@@ -441,7 +441,12 @@ def main():
             ).execute()
             print("Categorized as INFO. Labeled for daily digest.")
         else:
-            print("Categorized as SPAM. Ignored.")
+            print("Categorized as SPAM. Moving to Trash...")
+            try:
+                gmail.users().messages().trash(userId='me', id=msg_id).execute()
+                print("Successfully moved SPAM email to Trash.")
+            except Exception as e:
+                print(f"Error trashing SPAM email: {e}")
             
         # Sleep for 4 seconds to respect the rate limit of Groq Free Tier
         time.sleep(4)
