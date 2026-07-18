@@ -304,14 +304,16 @@ def send_daily_digest():
     # Query for label:AI-Info
     query = f"label:{LABEL_INFO_NAME}"
     results = gmail.users().messages().list(userId='me', q=query).execute()
-    messages = results.get('messages', [])
+    all_messages = results.get('messages', [])
 
-    if not messages:
+    if not all_messages:
         print("No new INFO emails found for the daily digest.")
         send_telegram_text("📅 *DAILY DIGEST*\n\nNo updates today! Your inbox is clean.")
         return
 
-    print(f"Summarizing {len(messages)} INFO emails for digest...")
+    # Process at most 5 emails per execution to stay within Vercel 10s timeout
+    messages = all_messages[:5]
+    print(f"Summarizing {len(messages)} of {len(all_messages)} INFO emails for digest...")
     digest_items = []
     msg_ids = []
 
@@ -338,14 +340,19 @@ def send_daily_digest():
     # Send to Telegram
     date_str = datetime.now().strftime("%d %B %Y")
     digest_content = "\n\n".join(digest_items)
+    suffix = ""
+    if len(all_messages) > 5:
+        suffix = f"\n\n🕒 *Note:* Showing 5 of {len(all_messages)} emails. Send `/summary` again to see the next ones."
+        
     telegram_message = (
         f"📅 *DAILY DIGEST - {date_str}*\n\n"
-        f"Total emails scanned today: *{len(messages)}*\n\n"
+        f"Total emails scanned today: *{len(all_messages)}*\n\n"
         f"{digest_content}"
+        f"{suffix}"
     )
     send_telegram_text(telegram_message)
 
-    # Clean up: remove AI-Info label so they don't get summarized again tomorrow
+    # Clean up: remove AI-Info label for processed messages only
     gmail.users().messages().batchModify(
         userId='me',
         body={
