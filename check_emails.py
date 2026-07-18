@@ -362,6 +362,30 @@ def send_daily_digest():
     ).execute()
     print("Daily digest sent successfully and labels cleared.")
 
+def clean_promotions(limit=300):
+    """Deletes up to `limit` promotional emails in Gmail."""
+    gmail = get_gmail_service()
+    query = "category:promotions"
+    try:
+        results = gmail.users().messages().list(userId='me', q=query, maxResults=limit).execute()
+        messages = results.get('messages', [])
+        if not messages:
+            return 0
+            
+        msg_ids = [m['id'] for m in messages]
+        gmail.users().messages().batchModify(
+            userId='me',
+            body={
+                'ids': msg_ids,
+                'addLabelIds': ['TRASH'],
+                'removeLabelIds': ['INBOX']
+            }
+        ).execute()
+        return len(msg_ids)
+    except Exception as e:
+        print(f"Error cleaning promotions: {e}")
+        return -1
+
 def main(max_emails=10):
     if len(sys.argv) > 1 and sys.argv[1] == "--digest":
         send_daily_digest()

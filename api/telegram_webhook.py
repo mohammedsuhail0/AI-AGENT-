@@ -260,6 +260,7 @@ async def telegram_webhook(request: Request):
                     "Commands you can use:\n"
                     "🔌 `/status` - Check API connectivity status\n"
                     "🔍 `/scan` - Scan inbox immediately for new emails\n"
+                    "🧹 `/clean` - Clean up to 300 promotional emails from inbox\n"
                     "📅 `/summary` - Trigger your Daily Digest summary immediately"
                 )
                 send_telegram_reply(user_chat_id, welcome_text)
@@ -279,6 +280,21 @@ async def telegram_webhook(request: Request):
                     return {"status": "command_processed", "command": "/scan"}
                 except Exception as e:
                     send_telegram_reply(user_chat_id, f"⚠️ *Error scanning inbox:* `{str(e)}`")
+                    return {"status": "error", "reason": str(e)}
+
+            elif command == "/clean":
+                send_telegram_reply(user_chat_id, "⏳ *Cleaning up to 300 promotional emails...*")
+                try:
+                    count = check_emails.clean_promotions(limit=300)
+                    if count > 0:
+                        send_telegram_reply(user_chat_id, f"🧹 *Cleaned {count} promotional email(s)* from your inbox! Moved them to Trash.")
+                    elif count == 0:
+                        send_telegram_reply(user_chat_id, "🧹 *Your promotions folder is already empty!* Clean inbox! ✨")
+                    else:
+                        send_telegram_reply(user_chat_id, "⚠️ *Error cleaning promotions.* Check Vercel logs.")
+                    return {"status": "command_processed", "command": "/clean"}
+                except Exception as e:
+                    send_telegram_reply(user_chat_id, f"⚠️ *Error cleaning promotions:* `{str(e)}`")
                     return {"status": "error", "reason": str(e)}
 
             elif command == "/summary":
