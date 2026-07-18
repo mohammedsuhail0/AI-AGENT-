@@ -362,7 +362,7 @@ def send_daily_digest():
     ).execute()
     print("Daily digest sent successfully and labels cleared.")
 
-def main():
+def main(max_emails=10):
     if len(sys.argv) > 1 and sys.argv[1] == "--digest":
         send_daily_digest()
         return
@@ -388,8 +388,8 @@ def main():
         print("No new unread emails to scan.")
         return
 
-    # Process at most 10 emails per execution to avoid hitting rate limits
-    messages = all_messages[:10]
+    # Process at most max_emails per execution to avoid hitting rate limits
+    messages = all_messages[:max_emails]
     print(f"Found {len(all_messages)} unread email(s). Processing up to {len(messages)} in this execution.")
 
     # Get Calendar Context once if there are messages to process

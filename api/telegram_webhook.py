@@ -259,6 +259,7 @@ async def telegram_webhook(request: Request):
                     "categorize incoming emails, and check your Google Calendar availability.\n\n"
                     "Commands you can use:\n"
                     "🔌 `/status` - Check API connectivity status\n"
+                    "🔍 `/scan` - Scan inbox immediately for new emails\n"
                     "📅 `/summary` - Trigger your Daily Digest summary immediately"
                 )
                 send_telegram_reply(user_chat_id, welcome_text)
@@ -269,6 +270,17 @@ async def telegram_webhook(request: Request):
                 send_telegram_reply(user_chat_id, status_text)
                 return {"status": "command_processed", "command": "/status"}
                 
+            elif command == "/scan":
+                send_telegram_reply(user_chat_id, "⏳ *Scanning your Gmail inbox for new emails...*")
+                try:
+                    # Scan at most 2 emails from the webhook to stay within Vercel's 10s timeout
+                    check_emails.main(max_emails=2)
+                    send_telegram_reply(user_chat_id, "✅ *Scan completed!* Check above for any new URGENT email alerts.")
+                    return {"status": "command_processed", "command": "/scan"}
+                except Exception as e:
+                    send_telegram_reply(user_chat_id, f"⚠️ *Error scanning inbox:* `{str(e)}`")
+                    return {"status": "error", "reason": str(e)}
+
             elif command == "/summary":
                 send_telegram_reply(user_chat_id, "⏳ *Generating your Daily Digest immediately...*")
                 try:
