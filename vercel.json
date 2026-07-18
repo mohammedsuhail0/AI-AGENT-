@@ -1,4 +1,5 @@
 {
+  "name": "personal-email-agent",
   "version": 2,
   "builds": [
     {

@@ -1,11 +1,29 @@
 import os
+import sys
+import time
 import json
 import base64
 import requests
-import google.generativeai as genai
+from datetime import datetime, timedelta, timezone
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
+
+# Load local .env file if it exists (for local testing)
+env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+if os.path.exists(env_path):
+    with open(env_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, val = line.split("=", 1)
+                os.environ[key.strip()] = val.strip()
+
+# Set console encoding to UTF-8 to prevent print crashes on Windows when encountering emojis/unicode
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8')
 
 # Load Environment Variables (GitHub Secrets or Local Env)
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID")
@@ -13,13 +31,11 @@ GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET")
 GOOGLE_REFRESH_TOKEN = os.environ.get("GOOGLE_REFRESH_TOKEN")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+STUDENT_PROFILE = os.environ.get("STUDENT_PROFILE", "I am a college student in India studying Computer Science. Actively looking for internships and scholarship opportunities. Keep typical reply tone helpful, polite, and formal.")
 
-LABEL_NAME = "AI-Scanned"
-
-# Setup Gemini Client
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+LABEL_SCAN_NAME = "AI-Scanned"
+LABEL_INFO_NAME = "AI-Info"
 
 def get_gmail_service():
     """Authenticates and returns the Gmail API service client."""
@@ -30,30 +46,41 @@ def get_gmail_service():
         client_id=GOOGLE_CLIENT_ID,
         client_secret=GOOGLE_CLIENT_SECRET
     )
-    # Refresh the access token
     creds.refresh(Request())
     return build('gmail', 'v1', credentials=creds)
 
-def get_or_create_label(service):
-    """Checks if the label AI-Scanned exists, creates it if not, and returns its ID."""
+def get_calendar_service():
+    """Authenticates and returns the Google Calendar API service client."""
+    creds = Credentials(
+        token=None,
+        refresh_token=GOOGLE_REFRESH_TOKEN,
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=GOOGLE_CLIENT_ID,
+        client_secret=GOOGLE_CLIENT_SECRET
+    )
+    creds.refresh(Request())
+    return build('calendar', 'v3', credentials=creds)
+
+def get_or_create_label(service, label_name):
+    """Checks if a label exists, creates it if not, and returns its ID."""
     try:
         results = service.users().labels().list(userId='me').execute()
         labels = results.get('labels', [])
         for label in labels:
-            if label['name'] == LABEL_NAME:
+            if label['name'] == label_name:
                 return label['id']
         
         # Label doesn't exist, create it
         label_body = {
-            'name': LABEL_NAME,
+            'name': label_name,
             'labelListVisibility': 'labelShow',
             'messageListVisibility': 'show'
         }
         created_label = service.users().labels().create(userId='me', body=label_body).execute()
-        print(f"Created new label: {LABEL_NAME}")
+        print(f"Created new label: {label_name}")
         return created_label['id']
     except Exception as e:
-        print(f"Error getting/creating label: {e}")
+        print(f"Error getting/creating label {label_name}: {e}")
         return None
 
 def parse_email_body(payload):
@@ -82,25 +109,98 @@ def clean_email_headers(message_detail):
             email_data[name] = header.get('value')
     return email_data
 
-def classify_email(sender, subject, body):
-    """Uses Gemini 1.5 Flash to categorize the email and draft a reply if urgent."""
-    prompt = f"""
+def get_upcoming_events(service):
+    """Fetches calendar events for the next 3 days to check availability."""
+    try:
+        now = datetime.now(timezone.utc)
+        time_min = now.isoformat()
+        time_max = (now + timedelta(days=3)).isoformat()
+        
+        events_result = service.events().list(
+            calendarId='primary', 
+            timeMin=time_min,
+            timeMax=time_max, 
+            singleEvents=True,
+            orderBy='startTime'
+        ).execute()
+        
+        events = events_result.get('items', [])
+        formatted_events = []
+        for event in events:
+            start = event['start'].get('dateTime', event['start'].get('date'))
+            end = event['end'].get('dateTime', event['end'].get('date'))
+            summary = event.get('summary', 'Busy')
+            
+            # Format datetime nicely
+            try:
+                start_dt = datetime.fromisoformat(start.replace('Z', '+00:00'))
+                end_dt = datetime.fromisoformat(end.replace('Z', '+00:00'))
+                start_str = start_dt.strftime("%A, %b %d at %I:%M %p")
+                end_str = end_dt.strftime("%I:%M %p")
+                time_range = f"{start_str} - {end_str}"
+            except Exception:
+                time_range = f"{start} to {end}"
+
+            formatted_events.append(f"- {summary} ({time_range})")
+        
+        return "\n".join(formatted_events) if formatted_events else "No upcoming events (completely free)."
+    except Exception as e:
+        print(f"Error fetching calendar events: {e}")
+        return "Could not retrieve calendar events."
+
+def call_groq_api(system_prompt, user_prompt, json_mode=False):
+    """Calls Groq API chat completions endpoint using requests."""
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "llama-3.1-8b-instant",
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        "temperature": 0.1
+    }
+    if json_mode:
+        payload["response_format"] = {"type": "json_object"}
+
+    response = requests.post(url, json=payload, headers=headers)
+    if response.status_code != 200:
+        raise Exception(f"Groq API Error: {response.text}")
+        
+    result = response.json()
+    return result["choices"][0]["message"]["content"].strip()
+
+def classify_email(sender, subject, body, calendar_context):
+    """Uses Groq (Llama 3.1) to categorize the email, check calendar, and draft a reply."""
+    system_prompt = f"""
     You are an elite personal AI assistant for a college student in India. 
-    Analyze this email and categorize it.
+    Analyze the incoming email and categorize it.
     
-    Email Details:
+    Student Profile Context:
+    {STUDENT_PROFILE}
+    """
+    
+    user_prompt = f"""
+    Gmail Message Details:
     From: {sender}
     Subject: {subject}
     Body:
     {body}
+
+    Student's Upcoming Google Calendar Schedule (Next 3 Days):
+    {calendar_context}
     
-    Decide if this is:
+    Decide if this email is:
     1. "URGENT": Immediate action required (scholarships, job/placement cell invites, official exams/grades, interviews).
     2. "INFO": No immediate response needed but good to know (academic newsletters, generic campus updates, club announcements).
     3. "SPAM": Ads, promotional coupons, social networks, receipts.
 
-    If the email is URGENT, write a concise, professional draft reply in English as the student. 
-    If a meeting/interview is mentioned, suggest availability slots generically, or keep it open for confirmation.
+    If the email is URGENT:
+    - Write a concise, professional draft reply in English as the student. 
+    - If the email is asking to schedule a meeting, call, or interview, check the student's calendar schedule context provided above. Suggest free time slots that DO NOT conflict with their calendar events. Keep the tone professional, polite, and helpful.
     
     You MUST respond with a valid, clean JSON object matching this schema:
     {{
@@ -112,23 +212,14 @@ def classify_email(sender, subject, body):
     Do NOT include any markdown code blocks (like ```json) in your response, return ONLY the raw JSON string.
     """
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        response = model.generate_content(prompt)
-        text = response.text.strip()
-        
-        # Clean JSON wrappers if Gemini generated them anyway
-        if text.startswith("```json"):
-            text = text[7:]
-        if text.endswith("```"):
-            text = text[:-3]
-        
-        return json.loads(text.strip())
+        response_text = call_groq_api(system_prompt, user_prompt, json_mode=True)
+        return json.loads(response_text)
     except Exception as e:
-        print(f"Gemini API Error: {e}")
+        print(f"Groq Classification Error: {e}")
         return {
             "category": "INFO",
             "urgency_score": 1,
-            "reasoning": f"Failed to call Gemini: {str(e)}",
+            "reasoning": f"Failed to call Groq: {str(e)}",
             "draft_reply": ""
         }
 
@@ -168,39 +259,150 @@ def send_telegram_alert(sender, subject, summary, draft, thread_id):
     else:
         print("Telegram push alert sent successfully.")
 
-def main():
-    if not all([GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, GEMINI_API_KEY]):
-        print("Error: Missing required environment variables. Please check secrets.")
+def send_telegram_text(text):
+    """Helper to send a text message to Telegram."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text,
+        "parse_mode": "Markdown"
+    }
+    response = requests.post(url, json=payload)
+    if response.status_code != 200:
+        print(f"Telegram Send Error: {response.text}")
+
+def summarize_email_for_digest(sender, subject, body):
+    """Uses Groq to summarize an informational email in a single line."""
+    system_prompt = "You are an AI assistant. Summarize the following email in a single, clear, action-oriented sentence for a daily digest."
+    user_prompt = f"""
+    From: {sender}
+    Subject: {subject}
+    Body:
+    {body}
+    
+    Response must be a single sentence. Do not include markdown or quotes.
+    """
+    try:
+        return call_groq_api(system_prompt, user_prompt, json_mode=False)
+    except Exception as e:
+        print(f"Groq digest error: {e}")
+        return "Failed to summarize email contents."
+
+def send_daily_digest():
+    """Queries Gmail for label:AI-Info, compiles and sends a digest to Telegram, then clears the labels."""
+    print("Generating Daily Digest...")
+    if not all([GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, GROQ_API_KEY]):
+        print("Error: Missing secrets.")
         return
 
     gmail = get_gmail_service()
-    label_id = get_or_create_label(gmail)
-    
-    if not label_id:
-        print("Failed to access or create Gmail labels. Aborting.")
+    info_label_id = get_or_create_label(gmail, LABEL_INFO_NAME)
+    if not info_label_id:
+        print("AI-Info label not found. No digest to compile.")
         return
 
-    # Scan for unread emails not marked with our label
-    query = f"is:unread -label:{LABEL_NAME}"
+    # Query for label:AI-Info
+    query = f"label:{LABEL_INFO_NAME}"
     results = gmail.users().messages().list(userId='me', q=query).execute()
     messages = results.get('messages', [])
 
     if not messages:
+        print("No new INFO emails found for the daily digest.")
+        send_telegram_text("📅 *DAILY DIGEST*\n\nNo updates today! Your inbox is clean.")
+        return
+
+    print(f"Summarizing {len(messages)} INFO emails for digest...")
+    digest_items = []
+    msg_ids = []
+
+    for msg in messages:
+        msg_id = msg['id']
+        msg_ids.append(msg_id)
+        
+        try:
+            msg_detail = gmail.users().messages().get(userId='me', id=msg_id).execute()
+            headers = clean_email_headers(msg_detail)
+            body = parse_email_body(msg_detail.get('payload', {}))
+            
+            sender = headers['From']
+            subject = headers['Subject']
+            
+            # Truncate body to stay within Groq TPM limits
+            body_truncated = body[:2000] if len(body) > 2000 else body
+            
+            summary = summarize_email_for_digest(sender, subject, body_truncated)
+            digest_items.append(f"🔹 *{sender}*\n└ *Subject:* {subject}\n└ *AI Summary:* {summary}")
+        except Exception as e:
+            print(f"Error processing message {msg_id} for digest: {e}")
+
+    # Send to Telegram
+    date_str = datetime.now().strftime("%d %B %Y")
+    digest_content = "\n\n".join(digest_items)
+    telegram_message = (
+        f"📅 *DAILY DIGEST - {date_str}*\n\n"
+        f"Total emails scanned today: *{len(messages)}*\n\n"
+        f"{digest_content}"
+    )
+    send_telegram_text(telegram_message)
+
+    # Clean up: remove AI-Info label so they don't get summarized again tomorrow
+    gmail.users().messages().batchModify(
+        userId='me',
+        body={
+            'ids': msg_ids,
+            'removeLabelIds': [info_label_id]
+        }
+    ).execute()
+    print("Daily digest sent successfully and labels cleared.")
+
+def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--digest":
+        send_daily_digest()
+        return
+
+    if not all([GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, GROQ_API_KEY]):
+        print("Error: Missing required environment variables. Please check secrets.")
+        return
+
+    gmail = get_gmail_service()
+    scan_label_id = get_or_create_label(gmail, LABEL_SCAN_NAME)
+    info_label_id = get_or_create_label(gmail, LABEL_INFO_NAME)
+    
+    if not scan_label_id or not info_label_id:
+        print("Failed to access or create Gmail labels. Aborting.")
+        return
+
+    # Scan for unread emails not marked with our scan label
+    query = f"is:unread -label:{LABEL_SCAN_NAME}"
+    results = gmail.users().messages().list(userId='me', q=query).execute()
+    all_messages = results.get('messages', [])
+
+    if not all_messages:
         print("No new unread emails to scan.")
         return
 
-    print(f"Found {len(messages)} new email(s) to process.")
+    # Process at most 10 emails per execution to avoid hitting rate limits
+    messages = all_messages[:10]
+    print(f"Found {len(all_messages)} unread email(s). Processing up to {len(messages)} in this execution.")
+
+    # Get Calendar Context once if there are messages to process
+    calendar_context = "Could not connect to Google Calendar."
+    try:
+        calendar_service = get_calendar_service()
+        calendar_context = get_upcoming_events(calendar_service)
+    except Exception as e:
+        print(f"Failed to check calendar: {e}")
 
     for msg in messages:
         msg_id = msg['id']
         thread_id = msg['threadId']
         
-        # Apply label first to avoid duplicate runs if the script times out
+        # Apply scan label immediately to avoid duplicate runs if the script times out
         gmail.users().messages().batchModify(
             userId='me',
             body={
                 'ids': [msg_id],
-                'addLabelIds': [label_id]
+                'addLabelIds': [scan_label_id]
             }
         ).execute()
 
@@ -212,10 +414,13 @@ def main():
         sender = headers['From']
         subject = headers['Subject']
 
+        # Truncate body to first 3000 characters to stay within Groq TPM limits
+        body_truncated = body[:3000] if len(body) > 3000 else body
+
         print(f"Scanning email: {subject} from {sender}")
         
         # AI Classification
-        analysis = classify_email(sender, subject, body)
+        analysis = classify_email(sender, subject, body_truncated, calendar_context)
         
         category = analysis.get("category", "INFO")
         reason = analysis.get("reasoning", "")
@@ -225,9 +430,21 @@ def main():
         
         if category == "URGENT":
             send_telegram_alert(sender, subject, reason, draft, thread_id)
+        elif category == "INFO":
+            # Apply AI-Info label for later Daily Digest summary
+            gmail.users().messages().batchModify(
+                userId='me',
+                body={
+                    'ids': [msg_id],
+                    'addLabelIds': [info_label_id]
+                }
+            ).execute()
+            print("Categorized as INFO. Labeled for daily digest.")
         else:
-            # Optionally cache info digests here
-            print(f"Skipping alert for non-urgent email. Categorized as {category}.")
+            print("Categorized as SPAM. Ignored.")
+            
+        # Sleep for 4 seconds to respect the rate limit of Groq Free Tier
+        time.sleep(4)
 
 if __name__ == '__main__':
     main()

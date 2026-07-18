@@ -1,0 +1,11 @@
+.env
+credentials.json
+__pycache__/
+*.pyc
+.vercel/
+.pytest_cache/
+*.json.log
+*.log
+digest_cache.json
+
+.vercel
