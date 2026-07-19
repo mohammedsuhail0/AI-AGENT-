@@ -483,4 +483,18 @@ def main(max_emails=10):
         time.sleep(4)
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"Global execution failure:\n{tb}")
+        
+        # If running in GitHub Actions, push the traceback to Telegram for remote diagnostics
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            try:
+                error_msg = f"⚠️ *GitHub Actions Workflow Failure:*\n\n```text\n{tb[:3800]}\n```"
+                send_telegram_text(error_msg)
+            except Exception as te:
+                print(f"Failed to send failure alert to Telegram: {te}")
+        sys.exit(1)
