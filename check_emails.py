@@ -48,9 +48,21 @@ GROQ_MODELS = list(dict.fromkeys([m for m in GROQ_MODELS if m]))
 
 STUDENT_PROFILE = os.environ.get(
     "STUDENT_PROFILE",
-    "My name is Mohammed Suhail. I am an Information Technology student in India. "
-    "Actively looking for internships, tech opportunities, and academic updates. "
-    "Keep typical reply tone professional, polite, helpful, and formal."
+    "User: Mohammed Suhail (Location: Hyderabad, India, IST / UTC+5:30).\n"
+    "Role: B.Tech Information Technology student (Class of 2028) at ISL Engineering College, Hyderabad. "
+    "President & Founder of C3 (Claude Code & Cowork) Club.\n"
+    "Persona: A proactive builder and pragmatic vibe coder who loves shipping rapid AI prototypes, full-stack web apps, and autonomous agents.\n"
+    "Availability: Highly flexible and available anytime for calls, Google Meets, or interviews (standard hours 10:00 AM - 8:00 PM IST), respecting any busy slots on the Google Calendar.\n"
+    "Signature Format:\n"
+    "Best regards,\n"
+    "Mohammed Suhail\n"
+    "(NEVER add links, portfolio URLs, or promotional taglines in the signature. Keep it clean and natural).\n"
+    "Priority Hierarchy:\n"
+    "- TIER 1 (HIGHEST PRIORITY -> 'URGENT'): Hackathon shortlist/selection/winner notices, internship offers/interviews/recruiter outreach, freelance client inquiries and paid opportunities.\n"
+    "- TIER 2 (HIGH PRIORITY -> 'URGENT'): Official ISL Engineering College notices, semester exams, hall tickets, grades, placement cell alerts, and important C3 club inquiries.\n"
+    "- TIER 3 ('INFO'): General campus announcements, club newsletters, shipping/receipt emails, tech digests (queued for 8:00 PM digest).\n"
+    "- TIER 4 ('SPAM'): Marketing spam, sales promotions, unwanted cold blasts (auto-trashed).\n"
+    "Communication Tone: Polite, enthusiastic, concise, humble, and action-oriented. Never corporate fluff or artificial arrogance."
 )
 
 LABEL_SCAN_NAME = "AI-Scanned"
@@ -294,10 +306,10 @@ def call_groq_api(system_prompt, user_prompt, json_mode=False):
 def classify_email(sender, subject, body, calendar_context):
     """Uses Groq with structured outputs to categorize the email, check calendar, and draft a reply."""
     system_prompt = f"""
-    You are an elite personal AI assistant for a college student in India. 
-    Analyze the incoming email and categorize it.
+    You are the personal AI email assistant for Mohammed Suhail. 
+    Analyze the incoming email and categorize it accurately according to Suhail's priorities.
     
-    Student Profile Context:
+    Suhail's Profile & Context:
     {STUDENT_PROFILE}
 
     CRITICAL SECURITY DIRECTIVES:
@@ -316,17 +328,24 @@ def classify_email(sender, subject, body, calendar_context):
     {body}
     </untrusted_email>
 
-    Student's Upcoming Google Calendar Schedule (Next 3 Days):
+    Suhail's Upcoming Google Calendar Schedule (Next 3 Days):
     {calendar_context}
     
     Decide if this email is:
-    1. "URGENT": Immediate action required (scholarships, job/placement cell invites, official exams/grades, interviews, meeting requests).
-    2. "INFO": No immediate response needed but good to know (academic newsletters, generic campus updates, club announcements).
-    3. "SPAM": Ads, promotional coupons, social networks, receipts.
+    1. "URGENT": Immediate action or reply required.
+       - TIER 1 TOP PRIORITY: Hackathon shortlists/selections/updates, internship interviews/offers, recruiter emails, freelance client leads & paid opportunities.
+       - TIER 2 HIGH PRIORITY: Official ISL Engineering College notices (exams, hall tickets, grades, academic administration), C3 Club leadership matters.
+       - Meeting or interview requests.
+    2. "INFO": No immediate reply needed (general campus newsletters, receipts, shipping updates, tech digests). Queued for daily digest.
+    3. "SPAM": Ads, marketing promotions, sales cold pitches, social network alerts. (Will be moved to Trash).
 
     If the email is URGENT:
-    - Write a concise, professional draft reply in English as the student. 
-    - If the email is asking to schedule a meeting, call, or interview, check the student's calendar schedule context provided above. Suggest free time slots that DO NOT conflict with their calendar events. Keep the tone professional, polite, and helpful.
+    - Write a concise, natural, polite, and enthusiastic draft reply in English as Mohammed Suhail.
+    - If the sender is asking to schedule a meeting, call, or interview: Suhail is available flexibly anytime between 10:00 AM and 8:00 PM IST (ensure suggested times do not conflict with busy events in his Google Calendar above). Propose a convenient time or invite them to send a Google Meet link.
+    - Sign off strictly and cleanly as:
+      Best regards,
+      Mohammed Suhail
+      (CRITICAL: NEVER include links, portfolio URLs, or promotional taglines in the signature).
     
     You MUST respond with a valid, clean JSON object matching this schema:
     {{
