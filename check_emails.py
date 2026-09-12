@@ -332,12 +332,16 @@ def classify_email(sender, subject, body, calendar_context):
     {calendar_context}
     
     Decide if this email is:
-    1. "URGENT": Immediate action or reply required.
-       - TIER 1 TOP PRIORITY: Hackathon shortlists/selections/updates, internship interviews/offers, recruiter emails, freelance client leads & paid opportunities.
-       - TIER 2 HIGH PRIORITY: Official ISL Engineering College notices (exams, hall tickets, grades, academic administration), C3 Club leadership matters.
-       - Meeting or interview requests.
-    2. "INFO": No immediate reply needed (general campus newsletters, receipts, shipping updates, tech digests). Queued for daily digest.
-    3. "SPAM": Ads, marketing promotions, sales cold pitches, social network alerts. (Will be moved to Trash).
+    1. "URGENT": Any email sent by a human or organization that asks a question, requests a resume/CV, requests information, schedules a meeting, or relates to opportunities.
+       - TIER 1 TOP PRIORITY: Hackathon shortlists/updates, internship/job offers & recruiter outreach, freelance client inquiries.
+       - TIER 2 HIGH PRIORITY: Inquiries about C3 Club, direct questions from students/colleagues/faculty, official ISL Engineering College academic notices (exams, hall tickets, grades).
+       - Meeting, interview, or call requests.
+       - ANY email where someone is directly addressing Suhail or expecting his personal reply.
+    2. "INFO": STRICTLY automated system emails where NO personal response is expected (e.g. GitHub notifications, newsletters, shipping updates, receipts, blogs).
+    3. "SPAM": Marketing ads, cold mass sales pitches, social network alerts. (Will be moved to Trash).
+
+    CRITICAL RULE:
+    If an email is asking a direct question to Suhail, inquiring about C3 Club, or asking for his resume/CV: You MUST classify it as "URGENT" and you MUST draft a helpful, polite reply!
 
     Special Resume Detection:
     - Check if the email explicitly asks for Suhail's resume, CV, or updated profile document.
@@ -346,6 +350,7 @@ def classify_email(sender, subject, body, calendar_context):
 
     If the email is URGENT:
     - Write a concise, natural, polite, and enthusiastic draft reply in English as Mohammed Suhail.
+    - If the email is asking about C3 Club: Explain that C3 is the "Claude Code & Cowork" club at ISL Engineering College focused on rapid AI prototyping, Git/GitHub, and shipping real working projects every week.
     - If the sender is asking to schedule a meeting, call, or interview: Suhail is available flexibly anytime between 10:00 AM and 8:00 PM IST (ensure suggested times do not conflict with busy events in his Google Calendar above). Propose a convenient time or invite them to send a Google Meet link.
     - Sign off strictly and cleanly as:
       Best regards,
@@ -358,7 +363,7 @@ def classify_email(sender, subject, body, calendar_context):
       "urgency_score": 1-5,
       "attach_resume": true | false,
       "reasoning": "A 1-sentence explanation of why you classified it this way.",
-      "draft_reply": "Your drafted reply (leave empty if category is INFO or SPAM)"
+      "draft_reply": "Your drafted reply (leave empty ONLY if category is INFO or SPAM)"
     }}
     Do NOT include any markdown code blocks (like ```json) in your response, return ONLY the raw JSON string.
     """
@@ -604,16 +609,13 @@ def main(max_emails=10, sleep_between=True):
         return
 
 
-    query = f"is:unread -label:{LABEL_SCAN_NAME}"
-    results = gmail.users().messages().list(userId='me', q=query).execute()
+    query = "is:unread label:INBOX"
+    results = gmail.users().messages().list(userId='me', q=query, maxResults=max(max_emails * 3, 10)).execute()
     all_messages = results.get('messages', [])
 
     if not all_messages:
         print("No new unread emails to scan.")
         return
-
-    messages = all_messages[:max_emails]
-    print(f"Found {len(all_messages)} unread email(s). Processing up to {len(messages)} in this execution.")
 
     calendar_context = "Could not connect to Google Calendar."
     try:
@@ -622,10 +624,21 @@ def main(max_emails=10, sleep_between=True):
     except Exception as e:
         print(f"Failed to check calendar: {e}")
 
-    for msg in messages:
+    processed_count = 0
+    for msg in all_messages:
+        if processed_count >= max_emails:
+            break
+
         msg_id = msg['id']
         thread_id = msg['threadId']
-        
+
+        msg_detail = gmail.users().messages().get(userId='me', id=msg_id).execute()
+        msg_labels = msg_detail.get('labelIds', [])
+
+        # Message-level check: skip if THIS specific email was already processed
+        if scan_label_id in msg_labels:
+            continue
+
         # Apply scan label to mark in-flight
         gmail.users().messages().batchModify(
             userId='me',
@@ -635,7 +648,7 @@ def main(max_emails=10, sleep_between=True):
             }
         ).execute()
 
-        msg_detail = gmail.users().messages().get(userId='me', id=msg_id).execute()
+        processed_count += 1
         headers = clean_email_headers(msg_detail)
         body = parse_email_body(msg_detail.get('payload', {}))
         
@@ -649,12 +662,24 @@ def main(max_emails=10, sleep_between=True):
         
         category = analysis.get("category", "INFO")
         reason = analysis.get("reasoning", "")
-        draft = analysis.get("draft_reply", "")
-        
+        attach_resume = analysis.get("attach_resume", False)
+
+        # Safeguard: If resume requested or direct human inquiry about C3, force URGENT
+        if attach_resume or ("c3" in body_truncated.lower() and "?" in body_truncated):
+            category = "URGENT"
+            if not draft:
+                draft = (
+                    "Hi,\n\n"
+                    "Thank you for reaching out! C3 (Claude Code & Cowork) is our club at ISL Engineering College "
+                    "where we learn prompt engineering, modern development with Claude Code, and ship real working prototypes every week.\n\n"
+                    "Please let me know if you'd like to connect or discuss further!\n\n"
+                    "Best regards,\n"
+                    "Mohammed Suhail"
+                )
+
         print(f"AI Category: {category} | Reason: {reason}")
         
         if category == "URGENT":
-            attach_resume = analysis.get("attach_resume", False)
             send_telegram_alert(sender, subject, reason, draft, thread_id, attach_resume=attach_resume)
         elif category == "INFO":
             gmail.users().messages().batchModify(
