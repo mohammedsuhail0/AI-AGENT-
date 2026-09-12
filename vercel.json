@@ -11,6 +11,10 @@
     {
       "src": "/api/telegram_webhook",
       "dest": "api/telegram_webhook.py"
+    },
+    {
+      "src": "/api/gmail_push",
+      "dest": "api/telegram_webhook.py"
     }
   ]
 }

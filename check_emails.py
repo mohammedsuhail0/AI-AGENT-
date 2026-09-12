@@ -693,9 +693,43 @@ def main(max_emails=10, sleep_between=True):
             time.sleep(3)
 
 
+def register_gmail_watch(topic_name=None):
+    """
+    Registers or auto-renews a real-time push watch on the Gmail inbox via Google Cloud Pub/Sub.
+    Google subscriptions expire every 7 days; this extends it for another 7 days.
+    """
+    if not topic_name:
+        topic_name = os.environ.get("GOOGLE_PUBSUB_TOPIC", "projects/ai-agent-502814/topics/gmail-notifications")
+        
+    try:
+        gmail = get_gmail_service()
+        request_body = {
+            'labelIds': ['INBOX'],
+            'topicName': topic_name
+        }
+        res = gmail.users().watch(userId='me', body=request_body).execute()
+        exp_ms = int(res.get('expiration', 0))
+        exp_date = datetime.fromtimestamp(exp_ms / 1000, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+        print(f"✅ Real-Time Gmail Watch active & renewed!")
+        print(f"└ Topic: {topic_name}")
+        print(f"└ Expiration: {exp_date}")
+        return res
+    except Exception as e:
+        print(f"⚠️ Notice: Gmail watch registration skipped/failed: {e}")
+        return None
+
+
 if __name__ == '__main__':
     try:
-        main()
+        if '--watch' in sys.argv:
+            register_gmail_watch()
+            sys.exit(0)
+        elif '--digest' in sys.argv:
+            send_daily_digest()
+            register_gmail_watch()  # Auto-renew watch every day!
+            sys.exit(0)
+        else:
+            main()
     except Exception as e:
         import traceback
         tb = traceback.format_exc()

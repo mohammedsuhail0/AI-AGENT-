@@ -441,3 +441,27 @@ async def telegram_webhook(request: Request):
                 return {"status": "unknown_command"}
 
     return {"status": "ignored", "reason": "unhandled payload type"}
+
+
+@app.post("/api/gmail_push")
+async def gmail_push(request: Request):
+    """
+    Real-time push webhook receiving events from Google Cloud Pub/Sub.
+    Triggers immediate 0-second email scanning and Telegram alert delivery.
+    """
+    try:
+        data = await request.json()
+        message = data.get("message", {})
+        data_b64 = message.get("data", "")
+        if data_b64:
+            decoded = json.loads(base64.b64decode(data_b64).decode("utf-8"))
+            print(f"Received Gmail push event for: {decoded.get('emailAddress')}, historyId: {decoded.get('historyId')}")
+            
+        # Immediately process newest unread email without sleep
+        check_emails.main(max_emails=1, sleep_between=False)
+        return JSONResponse(status_code=200, content={"status": "acknowledged"})
+    except Exception as e:
+        print(f"Error handling Gmail push: {e}")
+        # Always return 200 so Pub/Sub does not redundantly loop retries
+        return JSONResponse(status_code=200, content={"status": "error_handled", "error": str(e)})
+
