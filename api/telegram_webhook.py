@@ -11,6 +11,8 @@ from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request as GoogleRequest
 from googleapiclient.discovery import build
 from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.mime.application import MIMEApplication
 
 # Add parent directory to sys.path to import check_emails
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -83,8 +85,8 @@ def extract_draft_from_message(text):
     return None
 
 
-def send_gmail_reply(service, thread_id, draft_body):
-    """Sends a reply back in the original Gmail thread, preserving RFC 822 thread headers."""
+def send_gmail_reply(service, thread_id, draft_body, attach_resume=False):
+    """Sends a reply back in the original Gmail thread, optionally attaching the PDF resume."""
     thread = service.users().threads().get(userId='me', id=thread_id).execute()
     messages = thread.get('messages', [])
     if not messages:
@@ -119,13 +121,48 @@ def send_gmail_reply(service, thread_id, draft_body):
     if not subject.lower().startswith("re:"):
         subject = f"Re: {subject}"
 
+    if attach_resume:
+        msg = MIMEMultipart()
+        msg['To'] = reply_to
+        msg['Subject'] = subject
+        if msg_id:
+            msg['In-Reply-To'] = msg_id
+            msg['References'] = msg_id
+            
+        msg.attach(MIMEText(draft_body, 'plain'))
 
-    msg = MIMEText(draft_body)
-    msg['To'] = reply_to
-    msg['Subject'] = subject
-    if msg_id:
-        msg['In-Reply-To'] = msg_id
-        msg['References'] = msg_id
+        # Fetch / Load PDF Resume
+        pdf_bytes = None
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        local_pdf_path = os.path.join(base_dir, "Mohammed_Suhail_Resume.pdf")
+        if os.path.exists(local_pdf_path):
+            try:
+                with open(local_pdf_path, "rb") as f:
+                    pdf_bytes = f.read()
+            except Exception as e:
+                print(f"Error reading local resume: {e}")
+
+        if not pdf_bytes:
+            try:
+                res = requests.get("https://portfolio-suhail-eight.vercel.app/Mohammed_Suhail_Resume.pdf", timeout=10)
+                if res.status_code == 200:
+                    pdf_bytes = res.content
+            except Exception as e:
+                print(f"Error fetching resume from portfolio: {e}")
+
+        if pdf_bytes:
+            part = MIMEApplication(pdf_bytes, Name="Mohammed_Suhail_Resume.pdf")
+            part['Content-Disposition'] = 'attachment; filename="Mohammed_Suhail_Resume.pdf"'
+            msg.attach(part)
+        else:
+            print("Warning: Could not attach resume (file not found and URL download failed).")
+    else:
+        msg = MIMEText(draft_body)
+        msg['To'] = reply_to
+        msg['Subject'] = subject
+        if msg_id:
+            msg['In-Reply-To'] = msg_id
+            msg['References'] = msg_id
     
     raw_message = base64.urlsafe_b64encode(msg.as_bytes()).decode('utf-8')
     body = {
@@ -286,7 +323,8 @@ async def telegram_webhook(request: Request):
             edit_telegram_message(user_chat_id, message_id, new_text)
             return {"status": "ignored"}
 
-        elif action == "app":
+        elif action in ["app", "app_res"]:
+            attach_resume = (action == "app_res") or ("resume" in message_text.lower() and "attach" in message_text.lower())
             draft_reply = extract_draft_from_message(message_text)
             if not draft_reply:
                 safe_msg = html.escape(message_text)
@@ -296,19 +334,21 @@ async def telegram_webhook(request: Request):
 
             try:
                 gmail = get_gmail_service()
-                _, recipient = send_gmail_reply(gmail, thread_id, draft_reply)
+                _, recipient = send_gmail_reply(gmail, thread_id, draft_reply, attach_resume=attach_resume)
                 
                 safe_recip = html.escape(recipient)
                 safe_draft = html.escape(draft_reply)
+                attach_note = "📎 <b>Attached:</b> <code>Mohammed_Suhail_Resume.pdf</code>\n" if attach_resume else ""
                 success_text = (
                     f"📬 <b>STATUS: Email Sent successfully!</b>\n\n"
                     f"📧 <b>To:</b> <code>{safe_recip}</code>\n"
+                    f"{attach_note}"
                     f"✅ <b>Status:</b> Success (API 200)\n\n"
                     f"<b>Sent Reply:</b>\n"
                     f"<pre>{safe_draft}</pre>"
                 )
                 edit_telegram_message(user_chat_id, message_id, success_text)
-                return {"status": "sent"}
+                return {"status": "sent", "attached_resume": attach_resume}
             except Exception as e:
                 safe_err = html.escape(str(e))
                 safe_draft = html.escape(draft_reply)

@@ -339,6 +339,11 @@ def classify_email(sender, subject, body, calendar_context):
     2. "INFO": No immediate reply needed (general campus newsletters, receipts, shipping updates, tech digests). Queued for daily digest.
     3. "SPAM": Ads, marketing promotions, sales cold pitches, social network alerts. (Will be moved to Trash).
 
+    Special Resume Detection:
+    - Check if the email explicitly asks for Suhail's resume, CV, or updated profile document.
+    - If YES: Set "attach_resume": true in your JSON output, and write the draft reply explicitly stating that his resume has been attached for their review.
+    - If NO: Set "attach_resume": false.
+
     If the email is URGENT:
     - Write a concise, natural, polite, and enthusiastic draft reply in English as Mohammed Suhail.
     - If the sender is asking to schedule a meeting, call, or interview: Suhail is available flexibly anytime between 10:00 AM and 8:00 PM IST (ensure suggested times do not conflict with busy events in his Google Calendar above). Propose a convenient time or invite them to send a Google Meet link.
@@ -351,6 +356,7 @@ def classify_email(sender, subject, body, calendar_context):
     {{
       "category": "URGENT" | "INFO" | "SPAM",
       "urgency_score": 1-5,
+      "attach_resume": true | false,
       "reasoning": "A 1-sentence explanation of why you classified it this way.",
       "draft_reply": "Your drafted reply (leave empty if category is INFO or SPAM)"
     }}
@@ -368,23 +374,27 @@ def classify_email(sender, subject, body, calendar_context):
         return {
             "category": "ERROR",
             "urgency_score": 0,
+            "attach_resume": False,
             "reasoning": f"Failed to call Groq: {str(e)}",
             "draft_reply": ""
         }
 
 
-def send_telegram_alert(sender, subject, summary, draft, thread_id):
+def send_telegram_alert(sender, subject, summary, draft, thread_id, attach_resume=False):
     """Sends an interactive Telegram alert with Approve & Ignore inline buttons using safe HTML."""
     safe_sender = html.escape(sender or "Unknown")
     safe_subject = html.escape(subject or "(No Subject)")
     safe_summary = html.escape(summary or "")
     safe_draft = html.escape(draft or "")
 
+    attachment_badge = "📎 <b>Attachment:</b> <code>Mohammed_Suhail_Resume.pdf</code> (Auto-attached on Send)\n\n" if attach_resume else ""
+
     message = (
         f"🔴 <b>URGENT EMAIL DETECTED</b>\n\n"
         f"📧 <b>From:</b> {safe_sender}\n"
         f"📌 <b>Subject:</b> {safe_subject}\n\n"
         f"📖 <b>Summary:</b> {safe_summary}\n\n"
+        f"{attachment_badge}"
         f"📝 <b>Drafted Reply:</b>\n"
         f"<pre>{safe_draft}</pre>"
     )
@@ -399,14 +409,18 @@ def send_telegram_alert(sender, subject, summary, draft, thread_id):
             f"📧 <b>From:</b> {safe_sender}\n"
             f"📌 <b>Subject:</b> {safe_subject}\n\n"
             f"📖 <b>Summary:</b> {safe_summary}\n\n"
+            f"{attachment_badge}"
             f"📝 <b>Drafted Reply:</b>\n"
             f"<pre>{safe_draft}</pre>"
         )
 
+    btn_text = "✅ Send Reply & Attach Resume" if attach_resume else "✅ Send Reply"
+    action_cb = f"app_res:{thread_id}" if attach_resume else f"app:{thread_id}"
+
     keyboard = {
         "inline_keyboard": [
             [
-                {"text": "✅ Send Reply", "callback_data": f"app:{thread_id}"},
+                {"text": btn_text, "callback_data": action_cb},
                 {"text": "❌ Ignore", "callback_data": f"ign:{thread_id}"}
             ]
         ]
@@ -640,7 +654,8 @@ def main(max_emails=10, sleep_between=True):
         print(f"AI Category: {category} | Reason: {reason}")
         
         if category == "URGENT":
-            send_telegram_alert(sender, subject, reason, draft, thread_id)
+            attach_resume = analysis.get("attach_resume", False)
+            send_telegram_alert(sender, subject, reason, draft, thread_id, attach_resume=attach_resume)
         elif category == "INFO":
             gmail.users().messages().batchModify(
                 userId='me',
