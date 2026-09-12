@@ -112,8 +112,13 @@ def send_gmail_reply(service, thread_id, draft_body):
     match = re.search(r'<(.*?)>', from_email)
     reply_to = match.group(1) if match else from_email
 
+    # Header injection hardening: strip any newlines
+    reply_to = re.sub(r'[\r\n]+', ' ', reply_to).strip()
+    subject = re.sub(r'[\r\n]+', ' ', subject).strip()
+
     if not subject.lower().startswith("re:"):
         subject = f"Re: {subject}"
+
 
     msg = MIMEText(draft_body)
     msg['To'] = reply_to
