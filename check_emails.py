@@ -32,6 +32,7 @@ GOOGLE_REFRESH_TOKEN = os.environ.get("GOOGLE_REFRESH_TOKEN")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")
 STUDENT_PROFILE = os.environ.get("STUDENT_PROFILE", "I am a college student in India studying Computer Science. Actively looking for internships and scholarship opportunities. Keep typical reply tone helpful, polite, and formal.")
 
 LABEL_SCAN_NAME = "AI-Scanned"
@@ -156,7 +157,7 @@ def call_groq_api(system_prompt, user_prompt, json_mode=False):
         "Content-Type": "application/json"
     }
     payload = {
-        "model": "llama-3.1-8b-instant",
+        "model": GROQ_MODEL,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
@@ -217,8 +218,8 @@ def classify_email(sender, subject, body, calendar_context):
     except Exception as e:
         print(f"Groq Classification Error: {e}")
         return {
-            "category": "INFO",
-            "urgency_score": 1,
+            "category": "ERROR",
+            "urgency_score": 0,
             "reasoning": f"Failed to call Groq: {str(e)}",
             "draft_reply": ""
         }
@@ -471,7 +472,17 @@ def main(max_emails=10):
                 }
             ).execute()
             print("Categorized as INFO. Labeled for daily digest.")
-        else:
+        elif category == "ERROR":
+            # Groq or network failed: remove AI-Scanned label so it is retried next time
+            gmail.users().messages().batchModify(
+                userId='me',
+                body={
+                    'ids': [msg_id],
+                    'removeLabelIds': [scan_label_id]
+                }
+            ).execute()
+            print("⚠️ Classification failed. Removed AI-Scanned label to retry next cycle.")
+        elif category == "SPAM":
             print("Categorized as SPAM. Moving to Trash...")
             try:
                 gmail.users().messages().trash(userId='me', id=msg_id).execute()

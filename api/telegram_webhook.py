@@ -34,6 +34,7 @@ GOOGLE_REFRESH_TOKEN = os.environ.get("GOOGLE_REFRESH_TOKEN")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")
 
 # Webhook Secret Token (optional, telegram can send it in header X-Telegram-Bot-Api-Secret-Token)
 WEBHOOK_SECRET_TOKEN = os.environ.get("WEBHOOK_SECRET_TOKEN")
@@ -168,13 +169,13 @@ def run_status_check():
             "Content-Type": "application/json"
         }
         payload = {
-            "model": "llama-3.1-8b-instant",
+            "model": GROQ_MODEL,
             "messages": [{"role": "user", "content": "Ping"}],
             "max_tokens": 5
         }
         response = requests.post(url, json=payload, headers=headers)
         if response.status_code == 200:
-            status_msg += "✅ *Groq API:* Connected\n└ Model: `llama-3.1-8b-instant` (Free Tier)\n\n"
+            status_msg += f"✅ *Groq API:* Connected\n└ Model: `{GROQ_MODEL}` (Free Tier)\n\n"
         else:
             status_msg += f"❌ *Groq API:* Disconnected\n└ Error Code: {response.status_code}\n\n"
     except Exception as e:
