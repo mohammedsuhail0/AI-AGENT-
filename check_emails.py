@@ -649,69 +649,83 @@ def main(max_emails=10, sleep_between=True):
         ).execute()
 
         processed_count += 1
-        headers = clean_email_headers(msg_detail)
-        body = parse_email_body(msg_detail.get('payload', {}))
-        
-        sender = headers['From']
-        subject = headers['Subject']
-        body_truncated = body[:3000] if len(body) > 3000 else body
+        try:
+            headers = clean_email_headers(msg_detail)
+            body = parse_email_body(msg_detail.get('payload', {}))
+            
+            sender = headers['From']
+            subject = headers['Subject']
+            body_truncated = body[:3000] if len(body) > 3000 else body
 
-        print(f"Scanning email: '{subject}' from {sender}")
-        
-        analysis = classify_email(sender, subject, body_truncated, calendar_context)
-        
-        category = analysis.get("category", "INFO")
-        reason = analysis.get("reasoning", "")
-        attach_resume = analysis.get("attach_resume", False)
+            print(f"Scanning email: '{subject}' from {sender}")
+            
+            analysis = classify_email(sender, subject, body_truncated, calendar_context)
+            
+            category = analysis.get("category", "INFO")
+            reason = analysis.get("reasoning", "")
+            attach_resume = analysis.get("attach_resume", False)
+            draft = analysis.get("draft_reply", "")
 
-        # Safeguard: If resume requested or direct human inquiry about C3, force URGENT
-        if attach_resume or ("c3" in body_truncated.lower() and "?" in body_truncated):
-            category = "URGENT"
-            if not draft:
-                draft = (
-                    "Hi,\n\n"
-                    "Thank you for reaching out! C3 (Claude Code & Cowork) is our club at ISL Engineering College "
-                    "where we learn prompt engineering, modern development with Claude Code, and ship real working prototypes every week.\n\n"
-                    "Please let me know if you'd like to connect or discuss further!\n\n"
-                    "Best regards,\n"
-                    "Mohammed Suhail"
-                )
+            # Safeguard: If resume requested or direct human inquiry about C3, force URGENT
+            if attach_resume or ("c3" in body_truncated.lower() and "?" in body_truncated):
+                category = "URGENT"
+                if not draft:
+                    draft = (
+                        "Hi,\n\n"
+                        "Thank you for reaching out! C3 (Claude Code & Cowork) is our club at ISL Engineering College "
+                        "where we learn prompt engineering, modern development with Claude Code, and ship real working prototypes every week.\n\n"
+                        "Please let me know if you'd like to connect or discuss further!\n\n"
+                        "Best regards,\n"
+                        "Mohammed Suhail"
+                    )
 
-        print(f"AI Category: {category} | Reason: {reason}")
-        
-        if category == "URGENT":
-            send_telegram_alert(sender, subject, reason, draft, thread_id, attach_resume=attach_resume)
-        elif category == "INFO":
-            gmail.users().messages().batchModify(
-                userId='me',
-                body={
-                    'ids': [msg_id],
-                    'addLabelIds': [info_label_id]
-                }
-            ).execute()
-            print("Categorized as INFO. Labeled for daily digest.")
-        elif category == "ERROR":
-            # AI or network glitch: remove AI-Scanned label so it is retried next scan
-            gmail.users().messages().batchModify(
-                userId='me',
-                body={
-                    'ids': [msg_id],
-                    'removeLabelIds': [scan_label_id]
-                }
-            ).execute()
-            print("⚠️ Classification failed. Removed AI-Scanned label to retry next cycle.")
-        elif category == "SPAM":
-            print("Categorized as SPAM. Tagging AI-Spam and moving to Trash...")
+            print(f"AI Category: {category} | Reason: {reason}")
+            
+            if category == "URGENT":
+                send_telegram_alert(sender, subject, reason, draft, thread_id, attach_resume=attach_resume)
+            elif category == "INFO":
+                gmail.users().messages().batchModify(
+                    userId='me',
+                    body={
+                        'ids': [msg_id],
+                        'addLabelIds': [info_label_id]
+                    }
+                ).execute()
+                print("Categorized as INFO. Labeled for daily digest.")
+            elif category == "ERROR":
+                # AI or network glitch: remove AI-Scanned label so it is retried next scan
+                gmail.users().messages().batchModify(
+                    userId='me',
+                    body={
+                        'ids': [msg_id],
+                        'removeLabelIds': [scan_label_id]
+                    }
+                ).execute()
+                print("⚠️ Classification failed. Removed AI-Scanned label to retry next cycle.")
+            elif category == "SPAM":
+                print("Categorized as SPAM. Tagging AI-Spam and moving to Trash...")
+                try:
+                    if spam_label_id:
+                        gmail.users().messages().batchModify(
+                            userId='me',
+                            body={'ids': [msg_id], 'addLabelIds': [spam_label_id]}
+                        ).execute()
+                    gmail.users().messages().trash(userId='me', id=msg_id).execute()
+                    print("Successfully tagged AI-Spam and moved SPAM email to Trash.")
+                except Exception as e:
+                    print(f"Error trashing SPAM email: {e}")
+        except Exception as e:
+            print(f"Error processing email {msg_id}: {e}")
             try:
-                if spam_label_id:
-                    gmail.users().messages().batchModify(
-                        userId='me',
-                        body={'ids': [msg_id], 'addLabelIds': [spam_label_id]}
-                    ).execute()
-                gmail.users().messages().trash(userId='me', id=msg_id).execute()
-                print("Successfully tagged AI-Spam and moved SPAM email to Trash.")
-            except Exception as e:
-                print(f"Error trashing SPAM email: {e}")
+                gmail.users().messages().batchModify(
+                    userId='me',
+                    body={
+                        'ids': [msg_id],
+                        'removeLabelIds': [scan_label_id]
+                    }
+                ).execute()
+            except Exception:
+                pass
 
             
         if sleep_between:
