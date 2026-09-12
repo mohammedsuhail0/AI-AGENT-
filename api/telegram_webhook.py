@@ -4,6 +4,7 @@ import base64
 import requests
 import re
 import sys
+import html
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from google.oauth2.credentials import Credentials
@@ -34,13 +35,13 @@ GOOGLE_REFRESH_TOKEN = os.environ.get("GOOGLE_REFRESH_TOKEN")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")
 
-# Webhook Secret Token (optional, telegram can send it in header X-Telegram-Bot-Api-Secret-Token)
+# Webhook Secret Token (optional)
 WEBHOOK_SECRET_TOKEN = os.environ.get("WEBHOOK_SECRET_TOKEN")
 
+
 def get_gmail_service():
-    """Refreshes the OAuth credentials and returns a Gmail API service client."""
+    """Refreshes OAuth credentials and returns a Gmail API service client."""
     creds = Credentials(
         token=None,
         refresh_token=GOOGLE_REFRESH_TOKEN,
@@ -51,23 +52,39 @@ def get_gmail_service():
     creds.refresh(GoogleRequest())
     return build('gmail', 'v1', credentials=creds)
 
+
 def extract_draft_from_message(text):
-    """Parses the drafted reply out of the Telegram alert message block."""
-    pattern = r"```text\n(.*?)\n```"
-    match = re.search(pattern, text, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-        
-    # Fallback if Telegram strips backticks in plain text callback queries
+    """
+    Robustly parses the drafted reply out of Telegram message text.
+    Handles HTML <pre>, <code>, Markdown code blocks, and plain text fallbacks.
+    """
+    if not text:
+        return None
+
+    # 1. Check HTML <pre>...</pre> or <pre><code>...</code></pre>
+    html_match = re.search(r'<pre>(?:<code>)?(.*?)(?:</code>)?</pre>', text, re.DOTALL | re.IGNORECASE)
+    if html_match:
+        return html.unescape(html_match.group(1)).strip()
+
+    # 2. Check Markdown ```text ... ``` or ``` ... ```
+    md_match = re.search(r'```(?:text)?\n?(.*?)\n?```', text, re.DOTALL)
+    if md_match:
+        return md_match.group(1).strip()
+
+    # 3. Check plain text label
     if "Drafted Reply:" in text:
         parts = text.split("Drafted Reply:")
         if len(parts) > 1:
-            return parts[1].strip()
-            
+            candidate = parts[1].strip()
+            # Strip outer quotes or backticks if left over
+            candidate = re.sub(r'^[`"\']+|[`"\']+$', '', candidate)
+            return candidate.strip()
+
     return None
 
+
 def send_gmail_reply(service, thread_id, draft_body):
-    """Sends a reply back in the original Gmail thread, preserving headers."""
+    """Sends a reply back in the original Gmail thread, preserving RFC 822 thread headers."""
     thread = service.users().threads().get(userId='me', id=thread_id).execute()
     messages = thread.get('messages', [])
     if not messages:
@@ -76,7 +93,6 @@ def send_gmail_reply(service, thread_id, draft_body):
     last_msg = messages[-1]
     headers = last_msg.get('payload', {}).get('headers', [])
     
-    # Extract headers
     msg_id = ""
     subject = ""
     to_email = ""
@@ -93,19 +109,18 @@ def send_gmail_reply(service, thread_id, draft_body):
         elif name == 'to':
             to_email = h['value']
 
-    # Reply to sender
     match = re.search(r'<(.*?)>', from_email)
     reply_to = match.group(1) if match else from_email
 
     if not subject.lower().startswith("re:"):
         subject = f"Re: {subject}"
 
-    # Build MIME RFC 822 Email Message
     msg = MIMEText(draft_body)
     msg['To'] = reply_to
     msg['Subject'] = subject
-    msg['In-Reply-To'] = msg_id
-    msg['References'] = msg_id
+    if msg_id:
+        msg['In-Reply-To'] = msg_id
+        msg['References'] = msg_id
     
     raw_message = base64.urlsafe_b64encode(msg.as_bytes()).decode('utf-8')
     body = {
@@ -116,77 +131,122 @@ def send_gmail_reply(service, thread_id, draft_body):
     result = service.users().messages().send(userId='me', body=body).execute()
     return result, reply_to
 
-def send_telegram_reply(chat_id, text, reply_to_message_id=None):
-    """Sends a standard text message back to Telegram."""
+
+def send_telegram_reply(chat_id, text, reply_to_message_id=None, parse_mode="HTML"):
+    """Sends a text message back to Telegram."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "Markdown"
+        "text": text[:4000],
+        "parse_mode": parse_mode
     }
     if reply_to_message_id:
         payload["reply_to_message_id"] = reply_to_message_id
-    requests.post(url, json=payload)
+    res = requests.post(url, json=payload, timeout=10)
+    if res.status_code != 200 and parse_mode is not None:
+        payload["parse_mode"] = None
+        requests.post(url, json=payload, timeout=10)
 
-def edit_telegram_message(chat_id, message_id, status_text):
-    """Updates the original Telegram alert message, removing inline keyboard buttons."""
+
+def edit_telegram_message(chat_id, message_id, status_text, parse_mode="HTML"):
+    """Updates the original Telegram alert message and removes inline buttons."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
     payload = {
         "chat_id": chat_id,
         "message_id": message_id,
-        "text": status_text,
-        "parse_mode": "Markdown",
+        "text": status_text[:4000],
+        "parse_mode": parse_mode,
         "reply_markup": json.dumps({"inline_keyboard": []})
     }
-    requests.post(url, json=payload)
+    res = requests.post(url, json=payload, timeout=10)
+    if res.status_code != 200 and parse_mode is not None:
+        payload["parse_mode"] = None
+        requests.post(url, json=payload, timeout=10)
+
 
 def run_status_check():
-    """Runs a check on all three cloud APIs to ensure connection is working."""
-    status_msg = "🔌 *API CONNECTION STATUS CHECK*\n\n"
+    """Runs a check on Gmail, Calendar, and Groq APIs."""
+    status_msg = "🔌 <b>API CONNECTION STATUS CHECK</b>\n\n"
     
-    # 1. Check Gmail
+    # 1. Gmail Check
     try:
         gmail = get_gmail_service()
         profile = gmail.users().getProfile(userId='me').execute()
         email = profile.get('emailAddress', 'Unknown')
-        status_msg += f"✅ *Gmail API:* Connected\n└ Account: `{email}`\n\n"
+        status_msg += f"✅ <b>Gmail API:</b> Connected\n└ Account: <code>{html.escape(email)}</code>\n\n"
     except Exception as e:
-        status_msg += f"❌ *Gmail API:* Disconnected\n└ Error: `{str(e)}`\n\n"
+        status_msg += f"❌ <b>Gmail API:</b> Disconnected\n└ Error: <code>{html.escape(str(e))}</code>\n\n"
 
-    # 2. Check Google Calendar
+    # 2. Calendar Check
     try:
         calendar = check_emails.get_calendar_service()
         calendar.calendarList().list(maxResults=1).execute()
-        status_msg += "✅ *Google Calendar API:* Connected\n└ Permissions: Read-Only (OK)\n\n"
+        status_msg += "✅ <b>Google Calendar API:</b> Connected\n└ Permissions: Read-Only (OK)\n\n"
     except Exception as e:
-        status_msg += f"❌ *Google Calendar API:* Disconnected\n└ Error: `{str(e)}`\n\n"
+        status_msg += f"❌ <b>Google Calendar API:</b> Disconnected\n└ Error: <code>{html.escape(str(e))}</code>\n\n"
 
-    # 3. Check Groq
-    try:
-        url = "https://api.groq.com/openai/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {GROQ_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "model": GROQ_MODEL,
-            "messages": [{"role": "user", "content": "Ping"}],
-            "max_tokens": 5
-        }
-        response = requests.post(url, json=payload, headers=headers)
-        if response.status_code == 200:
-            status_msg += f"✅ *Groq API:* Connected\n└ Model: `{GROQ_MODEL}` (Free Tier)\n\n"
-        else:
-            status_msg += f"❌ *Groq API:* Disconnected\n└ Error Code: {response.status_code}\n\n"
-    except Exception as e:
-        status_msg += f"❌ *Groq API:* Disconnected\n└ Error: `{str(e)}`\n\n"
+    # 3. Groq Check (tries primary and fallback models)
+    groq_success = False
+    for model in check_emails.GROQ_MODELS:
+        try:
+            url = "https://api.groq.com/openai/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": "Ping"}],
+                "max_tokens": 5
+            }
+            res = requests.post(url, json=payload, headers=headers, timeout=8)
+            if res.status_code == 200:
+                status_msg += f"✅ <b>Groq API:</b> Connected\n└ Active Model: <code>{html.escape(model)}</code> (Free Tier)\n\n"
+                groq_success = True
+                break
+        except Exception:
+            continue
+
+    if not groq_success:
+        status_msg += "❌ <b>Groq API:</b> Disconnected\n└ All models failed or rate-limited.\n\n"
         
     return status_msg
+
+
+def run_inbox_count():
+    """Fetches real-time counts from Gmail."""
+    try:
+        gmail = get_gmail_service()
+        inbox_info = gmail.users().labels().get(userId='me', id='INBOX').execute()
+        total_inbox = inbox_info.get('messagesTotal', 0)
+        unread_inbox = inbox_info.get('messagesUnread', 0)
+        
+        try:
+            spam_info = gmail.users().labels().get(userId='me', id='SPAM').execute()
+            total_spam = spam_info.get('messagesTotal', 0)
+        except Exception:
+            total_spam = "N/A"
+            
+        try:
+            trash_info = gmail.users().labels().get(userId='me', id='TRASH').execute()
+            total_trash = trash_info.get('messagesTotal', 0)
+        except Exception:
+            total_trash = "N/A"
+
+        return (
+            "📊 <b>GMAIL INBOX STATUS</b>\n\n"
+            f"📬 <b>Total Inbox:</b> {total_inbox}\n"
+            f"📩 <b>Unread Inbox:</b> {unread_inbox}\n"
+            f"🗑️ <b>Trash:</b> {total_trash}\n"
+            f"🚫 <b>Spam:</b> {total_spam}\n"
+        )
+    except Exception as e:
+        return f"⚠️ <b>Error fetching inbox count:</b> <code>{html.escape(str(e))}</code>"
+
 
 @app.post("/api/telegram_webhook")
 async def telegram_webhook(request: Request):
     """Entrypoint for Telegram webhook updates."""
-    # Webhook Security Check (if secret token header is set)
     if WEBHOOK_SECRET_TOKEN:
         received_token = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
         if received_token != WEBHOOK_SECRET_TOKEN:
@@ -194,17 +254,20 @@ async def telegram_webhook(request: Request):
 
     data = await request.json()
     
-    # Handle Callback Queries (Button Clicks)
+    # 1. Handle Callback Queries (Button Taps)
     if "callback_query" in data:
         callback = data["callback_query"]
         user_chat_id = str(callback["message"]["chat"]["id"])
         message_id = callback["message"]["message_id"]
-        message_text = callback["message"]["text"]
-        callback_data = callback["data"]
+        message_text = callback["message"].get("text", "")
+        callback_data = callback.get("data", "")
         
-        # Security check: Ignore unauthorized users
         if user_chat_id != TELEGRAM_CHAT_ID:
             return JSONResponse(content={"status": "unauthorized"})
+
+        # Double-click idempotency check
+        if "Email Sent successfully" in message_text or "Archived Alert (Ignored)" in message_text:
+            return JSONResponse(content={"status": "already_processed"})
 
         parts = callback_data.split(":")
         if len(parts) != 2:
@@ -213,14 +276,16 @@ async def telegram_webhook(request: Request):
         action, thread_id = parts[0], parts[1]
 
         if action == "ign":
-            new_text = f"❌ *Archived Alert (Ignored)*\n\n{message_text}"
+            safe_original = html.escape(message_text)
+            new_text = f"❌ <b>Archived Alert (Ignored)</b>\n\n{safe_original}"
             edit_telegram_message(user_chat_id, message_id, new_text)
             return {"status": "ignored"}
 
         elif action == "app":
             draft_reply = extract_draft_from_message(message_text)
             if not draft_reply:
-                error_text = f"⚠️ *Error:* Could not extract draft reply from message.\n\n{message_text}"
+                safe_msg = html.escape(message_text)
+                error_text = f"⚠️ <b>Error:</b> Could not extract draft reply from message.\n\n{safe_msg}"
                 edit_telegram_message(user_chat_id, message_id, error_text)
                 return {"status": "error", "reason": "draft parse failed"}
 
@@ -228,32 +293,34 @@ async def telegram_webhook(request: Request):
                 gmail = get_gmail_service()
                 _, recipient = send_gmail_reply(gmail, thread_id, draft_reply)
                 
+                safe_recip = html.escape(recipient)
+                safe_draft = html.escape(draft_reply)
                 success_text = (
-                    f"📬 *STATUS: Email Sent successfully!*\n\n"
-                    f"📧 *To:* `{recipient}`\n"
-                    f"✅ *Status:* Success (API 200)\n\n"
-                    f"*Sent Reply:*\n"
-                    f"```text\n{draft_reply}\n```"
+                    f"📬 <b>STATUS: Email Sent successfully!</b>\n\n"
+                    f"📧 <b>To:</b> <code>{safe_recip}</code>\n"
+                    f"✅ <b>Status:</b> Success (API 200)\n\n"
+                    f"<b>Sent Reply:</b>\n"
+                    f"<pre>{safe_draft}</pre>"
                 )
                 edit_telegram_message(user_chat_id, message_id, success_text)
                 return {"status": "sent"}
             except Exception as e:
+                safe_err = html.escape(str(e))
+                safe_draft = html.escape(draft_reply)
                 fail_text = (
-                    f"⚠️ *Error Sending Email:*\n`{str(e)}`\n\n"
-                    f"*Draft Preserved:*\n"
-                    f"```text\n{draft_reply}\n```"
+                    f"⚠️ <b>Error Sending Email:</b>\n<code>{safe_err}</code>\n\n"
+                    f"<b>Draft Preserved:</b>\n"
+                    f"<pre>{safe_draft}</pre>"
                 )
                 edit_telegram_message(user_chat_id, message_id, fail_text)
                 return {"status": "error", "reason": str(e)}
 
-    # Handle Text Messages & Slash Commands
+    # 2. Handle Text Messages & Slash Commands
     elif "message" in data:
         message = data["message"]
         user_chat_id = str(message["chat"]["id"])
-        message_id = message["message_id"]
         text = message.get("text", "").strip()
 
-        # Security check: Ignore unauthorized users
         if user_chat_id != TELEGRAM_CHAT_ID:
             return JSONResponse(content={"status": "unauthorized"})
 
@@ -262,14 +329,15 @@ async def telegram_webhook(request: Request):
             
             if command == "/start":
                 welcome_text = (
-                    "👋 *Hello! I am your Personal Email AI Agent.*\n\n"
-                    "I am currently running and ready to scan your Gmail inbox, "
-                    "categorize incoming emails, and check your Google Calendar availability.\n\n"
-                    "Commands you can use:\n"
-                    "🔌 `/status` - Check API connectivity status\n"
-                    "🔍 `/scan` - Scan inbox immediately for new emails\n"
-                    "🧹 `/clean` - Clean up to 300 promotional emails from inbox\n"
-                    "📅 `/summary` - Trigger your Daily Digest summary immediately"
+                    "👋 <b>Hello! I am your Personal Email AI Agent.</b>\n\n"
+                    "I monitor your Gmail inbox, check Google Calendar availability, "
+                    "auto-delete spam, and draft replies to urgent inquiries.\n\n"
+                    "<b>Commands:</b>\n"
+                    "🔌 <code>/status</code> - Check API connectivity status\n"
+                    "📊 <code>/count</code> - View current inbox statistics\n"
+                    "🔍 <code>/scan</code> - Scan inbox immediately for new emails\n"
+                    "🧹 <code>/clean</code> - Move promotional emails to Trash\n"
+                    "📅 <code>/summary</code> - Trigger your Daily Digest immediately"
                 )
                 send_telegram_reply(user_chat_id, welcome_text)
                 return {"status": "command_processed", "command": "/start"}
@@ -278,44 +346,53 @@ async def telegram_webhook(request: Request):
                 status_text = run_status_check()
                 send_telegram_reply(user_chat_id, status_text)
                 return {"status": "command_processed", "command": "/status"}
+
+            elif command == "/count":
+                count_text = run_inbox_count()
+                send_telegram_reply(user_chat_id, count_text)
+                return {"status": "command_processed", "command": "/count"}
                 
             elif command == "/scan":
-                send_telegram_reply(user_chat_id, "⏳ *Scanning your Gmail inbox for new emails...*")
+                send_telegram_reply(user_chat_id, "⏳ <b>Scanning your Gmail inbox for new emails...</b>")
                 try:
-                    # Scan at most 2 emails from the webhook to stay within Vercel's 10s timeout
-                    check_emails.main(max_emails=2)
-                    send_telegram_reply(user_chat_id, "✅ *Scan completed!* Check above for any new URGENT email alerts.")
+                    # Scan 1 email without artificial sleep to stay well under Vercel's 10s ceiling
+                    check_emails.main(max_emails=1, sleep_between=False)
+                    send_telegram_reply(user_chat_id, "✅ <b>Scan completed!</b> Check above for any new URGENT email alerts.")
                     return {"status": "command_processed", "command": "/scan"}
                 except Exception as e:
-                    send_telegram_reply(user_chat_id, f"⚠️ *Error scanning inbox:* `{str(e)}`")
+                    safe_err = html.escape(str(e))
+                    send_telegram_reply(user_chat_id, f"⚠️ <b>Error scanning inbox:</b> <code>{safe_err}</code>")
                     return {"status": "error", "reason": str(e)}
 
             elif command == "/clean":
-                send_telegram_reply(user_chat_id, "⏳ *Cleaning up to 300 promotional emails...*")
+                send_telegram_reply(user_chat_id, "⏳ <b>Cleaning promotional emails...</b>")
                 try:
                     count = check_emails.clean_promotions(limit=300)
                     if count > 0:
-                        send_telegram_reply(user_chat_id, f"🧹 *Cleaned {count} promotional email(s)* from your inbox! Moved them to Trash.")
+                        send_telegram_reply(user_chat_id, f"🧹 <b>Cleaned {count} promotional email(s)</b> from your inbox! Moved them to Trash.")
                     elif count == 0:
-                        send_telegram_reply(user_chat_id, "🧹 *Your promotions folder is already empty!* Clean inbox! ✨")
+                        send_telegram_reply(user_chat_id, "🧹 <b>Your promotions folder is already empty!</b> Clean inbox! ✨")
                     else:
-                        send_telegram_reply(user_chat_id, "⚠️ *Error cleaning promotions.* Check Vercel logs.")
+                        send_telegram_reply(user_chat_id, "⚠️ <b>Error cleaning promotions.</b> Check Vercel logs.")
                     return {"status": "command_processed", "command": "/clean"}
                 except Exception as e:
-                    send_telegram_reply(user_chat_id, f"⚠️ *Error cleaning promotions:* `{str(e)}`")
+                    safe_err = html.escape(str(e))
+                    send_telegram_reply(user_chat_id, f"⚠️ <b>Error cleaning promotions:</b> <code>{safe_err}</code>")
                     return {"status": "error", "reason": str(e)}
 
             elif command == "/summary":
-                send_telegram_reply(user_chat_id, "⏳ *Generating your Daily Digest immediately...*")
+                send_telegram_reply(user_chat_id, "⏳ <b>Generating your Daily Digest immediately...</b>")
                 try:
                     check_emails.send_daily_digest()
                     return {"status": "command_processed", "command": "/summary"}
                 except Exception as e:
-                    send_telegram_reply(user_chat_id, f"⚠️ *Error generating summary:* `{str(e)}`")
+                    safe_err = html.escape(str(e))
+                    send_telegram_reply(user_chat_id, f"⚠️ <b>Error generating summary:</b> <code>{safe_err}</code>")
                     return {"status": "error", "reason": str(e)}
             
             else:
-                send_telegram_reply(user_chat_id, f"❓ *Unknown command:* `{command}`")
+                safe_cmd = html.escape(command)
+                send_telegram_reply(user_chat_id, f"❓ <b>Unknown command:</b> <code>{safe_cmd}</code>")
                 return {"status": "unknown_command"}
 
     return {"status": "ignored", "reason": "unhandled payload type"}
