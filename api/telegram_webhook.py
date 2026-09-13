@@ -43,16 +43,8 @@ WEBHOOK_SECRET_TOKEN = os.environ.get("WEBHOOK_SECRET_TOKEN")
 
 
 def get_gmail_service():
-    """Refreshes OAuth credentials and returns a Gmail API service client."""
-    creds = Credentials(
-        token=None,
-        refresh_token=GOOGLE_REFRESH_TOKEN,
-        token_uri="https://oauth2.googleapis.com/token",
-        client_id=GOOGLE_CLIENT_ID,
-        client_secret=GOOGLE_CLIENT_SECRET
-    )
-    creds.refresh(GoogleRequest())
-    return build('gmail', 'v1', credentials=creds)
+    """Returns cached Gmail API service client from check_emails."""
+    return check_emails.get_gmail_service()
 
 
 def extract_draft_from_message(text):

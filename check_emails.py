@@ -82,8 +82,18 @@ def notify_token_expired():
     send_telegram_text(msg, parse_mode="HTML")
 
 
+_cached_gmail_service = None
+_cached_gmail_creds = None
+_cached_calendar_service = None
+
+
 def get_gmail_service():
-    """Authenticates and returns the Gmail API service client."""
+    """Authenticates and returns the Gmail API service client with in-memory caching."""
+    global _cached_gmail_service, _cached_gmail_creds
+    
+    if _cached_gmail_service and _cached_gmail_creds and _cached_gmail_creds.valid:
+        return _cached_gmail_service
+
     creds = Credentials(
         token=None,
         refresh_token=GOOGLE_REFRESH_TOKEN,
@@ -93,6 +103,9 @@ def get_gmail_service():
     )
     try:
         creds.refresh(Request())
+        _cached_gmail_creds = creds
+        _cached_gmail_service = build('gmail', 'v1', credentials=creds)
+        return _cached_gmail_service
     except Exception as e:
         if "invalid_grant" in str(e).lower():
             print(f"Google Token Expired Error: {e}")
@@ -101,11 +114,15 @@ def get_gmail_service():
             except Exception:
                 pass
         raise e
-    return build('gmail', 'v1', credentials=creds)
 
 
 def get_calendar_service():
-    """Authenticates and returns the Google Calendar API service client."""
+    """Authenticates and returns the Google Calendar API service client with in-memory caching."""
+    global _cached_calendar_service, _cached_gmail_creds
+    
+    if _cached_calendar_service and _cached_gmail_creds and _cached_gmail_creds.valid:
+        return _cached_calendar_service
+
     creds = Credentials(
         token=None,
         refresh_token=GOOGLE_REFRESH_TOKEN,
@@ -115,11 +132,13 @@ def get_calendar_service():
     )
     try:
         creds.refresh(Request())
+        _cached_gmail_creds = creds
+        _cached_calendar_service = build('calendar', 'v3', credentials=creds)
+        return _cached_calendar_service
     except Exception as e:
         if "invalid_grant" in str(e).lower():
             print(f"Google Token Expired Error in Calendar: {e}")
         raise e
-    return build('calendar', 'v3', credentials=creds)
 
 
 def get_or_create_label(service, label_name):

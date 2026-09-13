@@ -171,6 +171,23 @@ TARS_TOOLS = [
                 "required": []
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_email",
+            "description": "Read the full text content and details of a specific email using its message ID.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "email_id": {
+                        "type": "string",
+                        "description": "The unique Gmail message ID (e.g. from search_emails or get_recent_unread_emails)."
+                    }
+                },
+                "required": ["email_id"]
+            }
+        }
     }
 ]
 
@@ -316,6 +333,26 @@ def tool_scan_inbox_now():
         return {"error": f"Inbox scan failed: {str(e)}"}
 
 
+def tool_read_email(email_id):
+    """Retrieves full email details and body text for a given message ID."""
+    try:
+        service = check_emails.get_gmail_service()
+        msg = service.users().messages().get(userId='me', id=email_id, format='full').execute()
+        payload = msg.get('payload', {})
+        headers = {h['name'].lower(): h['value'] for h in payload.get('headers', [])}
+        body = check_emails.parse_email_body(payload)
+        clean_body = check_emails.strip_html_tags(body) if body else "(Empty body)"
+        return {
+            "id": email_id,
+            "from": headers.get('from', 'Unknown'),
+            "subject": headers.get('subject', '(No Subject)'),
+            "date": headers.get('date', ''),
+            "body": clean_body[:1200]
+        }
+    except Exception as e:
+        return {"error": f"Failed to read email: {str(e)}"}
+
+
 # Map tool names to python functions
 TOOL_MAP = {
     "get_inbox_stats": tool_get_inbox_stats,
@@ -324,7 +361,8 @@ TOOL_MAP = {
     "check_calendar": tool_check_calendar,
     "clean_promotions": tool_clean_promotions,
     "create_draft_email": tool_create_draft_email,
-    "scan_inbox_now": tool_scan_inbox_now
+    "scan_inbox_now": tool_scan_inbox_now,
+    "read_email": tool_read_email
 }
 
 
@@ -334,9 +372,9 @@ TOOL_MAP = {
 
 TARS_MODELS = [
     "openai/gpt-oss-20b",
+    "openai/gpt-oss-120b",
     "qwen/qwen3.6-27b",
-    "qwen/qwen3.8-27b",
-    "openai/gpt-oss-120b"
+    "qwen/qwen3.8-27b"
 ]
 
 
@@ -376,7 +414,7 @@ def chat_with_tars(user_message: str) -> str:
                 "messages": curr_messages,
                 "tools": TARS_TOOLS,
                 "tool_choice": "auto",
-                "max_tokens": 400,
+                "max_tokens": 800,
                 "temperature": 0.5
             }
 
@@ -425,7 +463,7 @@ def chat_with_tars(user_message: str) -> str:
                 "model": model,
                 "messages": curr_messages,
                 "tools": TARS_TOOLS,
-                "max_tokens": 400,
+                "max_tokens": 800,
                 "temperature": 0.5
             }
             followup_resp = requests.post(url, headers=headers, json=followup_payload, timeout=8)
