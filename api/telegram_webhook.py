@@ -374,15 +374,21 @@ async def telegram_webhook(request: Request):
             
             if command == "/start":
                 welcome_text = (
-                    "👋 <b>Hello! I am your Personal Email AI Agent.</b>\n\n"
-                    "I monitor your Gmail inbox, check Google Calendar availability, "
-                    "auto-delete spam, and draft replies to urgent inquiries.\n\n"
-                    "<b>Commands:</b>\n"
-                    "🔌 <code>/status</code> - Check API connectivity status\n"
-                    "📊 <code>/count</code> - View current inbox statistics\n"
-                    "🔍 <code>/scan</code> - Scan inbox immediately for new emails\n"
-                    "🧹 <code>/clean</code> - Move promotional emails to Trash\n"
-                    "📅 <code>/summary</code> - Trigger your Daily Digest immediately"
+                    "🤖 <b>TARS Online.</b>\n\n"
+                    "<b>Parameters:</b>\n"
+                    "• Honesty: 90%\n"
+                    "• Humor: 75%\n"
+                    "• Loyalty: 100%\n\n"
+                    "Greetings, Suhail. I monitor your Gmail, manage your calendar, "
+                    "auto-delete spam, and draft replies for C3 & college opportunities.\n\n"
+                    "You don't need to speak to me in rigid slash commands anymore—just talk to me naturally:\n"
+                    "• <i>\"TARS, what's my inbox status?\"</i>\n"
+                    "• <i>\"Did anyone email me about C3 or hackathons?\"</i>\n"
+                    "• <i>\"What's on my schedule tomorrow?\"</i>\n"
+                    "• <i>\"Purge my promotional spam.\"</i>\n"
+                    "• <i>\"Draft an email to...\"</i>\n\n"
+                    "Quick shortcuts remain active: <code>/status</code>, <code>/count</code>, <code>/scan</code>, <code>/clean</code>, <code>/summary</code>.\n\n"
+                    "What's your vector, Commander?"
                 )
                 send_telegram_reply(user_chat_id, welcome_text)
                 return {"status": "command_processed", "command": "/start"}
@@ -436,9 +442,28 @@ async def telegram_webhook(request: Request):
                     return {"status": "error", "reason": str(e)}
             
             else:
-                safe_cmd = html.escape(command)
-                send_telegram_reply(user_chat_id, f"❓ <b>Unknown command:</b> <code>{safe_cmd}</code>")
-                return {"status": "unknown_command"}
+                # If an unrecognized slash command is typed, let TARS respond
+                try:
+                    import tars_agent
+                    tars_reply = tars_agent.chat_with_tars(text)
+                    send_telegram_reply(user_chat_id, tars_reply, parse_mode=None)
+                    return {"status": "tars_responded"}
+                except Exception:
+                    safe_cmd = html.escape(command)
+                    send_telegram_reply(user_chat_id, f"❓ <b>Unknown command:</b> <code>{safe_cmd}</code>")
+                    return {"status": "unknown_command"}
+
+        else:
+            # Natural language message -> Conversational TARS!
+            try:
+                import tars_agent
+                tars_reply = tars_agent.chat_with_tars(text)
+                send_telegram_reply(user_chat_id, tars_reply, parse_mode=None)
+                return {"status": "tars_responded"}
+            except Exception as e:
+                err_msg = f"⚠️ TARS error: {str(e)}"
+                send_telegram_reply(user_chat_id, err_msg, parse_mode=None)
+                return {"status": "error", "reason": str(e)}
 
     return {"status": "ignored", "reason": "unhandled payload type"}
 
