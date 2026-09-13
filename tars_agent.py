@@ -79,7 +79,7 @@ TARS_TOOLS = [
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "The search keyword (e.g. 'ISL', 'hackathon', 'C3', 'interview', 'freelance'). Always use broad single keywords rather than guessing domain names."
+                        "description": "The search keyword (e.g. 'ISL', 'hackathon', 'C3', 'interview'). To find incoming emails from external people to reply to, use '-from:me' (e.g. 'C3 -from:me')."
                     },
                     "limit": {
                         "type": "integer",
@@ -283,16 +283,25 @@ def tool_search_emails(query, limit=3):
                 userId='me',
                 id=m['id'],
                 format='metadata',
-                metadataHeaders=['From', 'Subject', 'Date']
+                metadataHeaders=['From', 'To', 'Subject', 'Date']
             ))
         batch.execute()
 
         results = []
+        user_email = os.environ.get("USER_EMAIL", "mdsuhailtab.1@gmail.com").lower()
         for md in raw_results:
             headers = {h['name'].lower(): h['value'] for h in md.get('payload', {}).get('headers', [])}
+            sender = headers.get('from', 'Unknown')
+            recipient = headers.get('to', '')
+            is_sent_by_me = user_email in sender.lower()
+            # If Suhail sent it, reply_to is whoever he sent it to; otherwise reply_to is sender
+            reply_to_target = recipient if is_sent_by_me else sender
             results.append({
                 "id": md.get('id'),
-                "from": headers.get('from', 'Unknown'),
+                "from": sender,
+                "to": recipient,
+                "sent_by_me": is_sent_by_me,
+                "reply_to": reply_to_target,
                 "subject": headers.get('subject', '(No Subject)'),
                 "date": headers.get('date', ''),
                 "snippet": md.get('snippet', '')
@@ -418,9 +427,17 @@ def tool_read_email(email_id):
         headers = {h['name'].lower(): h['value'] for h in payload.get('headers', [])}
         body = check_emails.parse_email_body(payload)
         clean_body = check_emails.strip_html_tags(body) if body else "(Empty body)"
+        user_email = os.environ.get("USER_EMAIL", "mdsuhailtab.1@gmail.com").lower()
+        sender = headers.get('from', 'Unknown')
+        recipient = headers.get('to', '')
+        is_sent_by_me = user_email in sender.lower()
+        reply_to_target = recipient if is_sent_by_me else sender
         return {
             "id": email_id,
-            "from": headers.get('from', 'Unknown'),
+            "from": sender,
+            "to": recipient,
+            "sent_by_me": is_sent_by_me,
+            "reply_to": reply_to_target,
             "subject": headers.get('subject', '(No Subject)'),
             "date": headers.get('date', ''),
             "body": clean_body[:1200]
@@ -478,9 +495,13 @@ def chat_with_tars(user_message: str) -> str:
         TARS_SYSTEM_PROMPT +
         "\nOperational rules:"
         "\n1. When the user asks you to find/search an email and draft a reply, first search/read the email, then call create_draft_email."
-        "\n2. CRITICAL: Whenever you create a draft, you MUST ALWAYS display the complete draft preview directly in your Telegram response so Suhail can review it right here! Format it clearly:"
+        "\n2. CRITICAL - NEVER EMAIL SUHAIL HIMSELF:"
+        "\n• Mohammed Suhail's own email address is mdsuhailtab.1@gmail.com (he is the BOSS/SENDER, not the recipient)."
+        "\n• NEVER set 'to' as mdsuhailtab.1@gmail.com. Do NOT send or draft emails to Suhail himself!"
+        "\n• When replying to an email, ALWAYS set 'to' as the EXTERNAL sender/contact (e.g. webclient07@gmail.com, mrstrange25502@gmail.com, etc.), using the 'reply_to' field provided by the email tools."
+        "\n3. Whenever you create a draft, you MUST ALWAYS display the complete draft preview directly in your Telegram response so Suhail can review it right here! Format it clearly:"
         "\n📩 **Draft Created in Gmail**"
-        "\n• **To:** <recipient>"
+        "\n• **To:** <external recipient>"
         "\n• **Subject:** <subject>"
         "\n• **Resume Attached:** <Yes/No>"
         "\n• **Draft ID:** `<draft_id>`"
@@ -488,8 +509,8 @@ def chat_with_tars(user_message: str) -> str:
         "\n<exact draft body text>"
         "\n```"
         "\n*Review the draft above. To send it, just tell me: 'TARS, send it' or send it from Gmail.*"
-        "\n3. If Suhail tells you to send the draft or says 'send it', call `send_draft` with the draft_id (or `send_email`) to dispatch it immediately."
-        "\n4. Always address Mohammed Suhail with TARS's characteristic wit and brevity."
+        "\n4. If Suhail tells you to send the draft or says 'send it', call `send_draft` with the draft_id (or `send_email`) to dispatch it immediately."
+        "\n5. Always address Mohammed Suhail with TARS's characteristic wit and brevity."
     )
 
     base_messages = [
