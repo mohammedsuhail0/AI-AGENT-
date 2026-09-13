@@ -79,12 +79,12 @@ TARS_TOOLS = [
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "The search query (e.g., 'hackathon', 'from:isl.edu', 'interview', 'C3')"
+                        "description": "The search keyword (e.g. 'ISL', 'hackathon', 'C3', 'interview', 'freelance'). Always use broad single keywords rather than guessing domain names."
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Maximum number of emails to retrieve (default 5)",
-                        "default": 5
+                        "description": "Maximum number of emails to retrieve (default 3)",
+                        "default": 3
                     }
                 },
                 "required": ["query"]
@@ -208,7 +208,7 @@ def tool_get_inbox_stats():
 
 
 def tool_search_emails(query, limit=3):
-    """Searches Gmail messages using query string."""
+    """Searches Gmail messages using query string with high-speed batch fetching."""
     try:
         service = check_emails.get_gmail_service()
         limit = min(max(1, limit), 3)
@@ -217,12 +217,26 @@ def tool_search_emails(query, limit=3):
         if not msgs:
             return {"query": query, "count": 0, "results": [], "message": "No matching emails found."}
 
-        results = []
+        raw_results = []
+        def callback(request_id, response, exception):
+            if not exception and response:
+                raw_results.append(response)
+
+        batch = service.new_batch_http_request(callback=callback)
         for m in msgs:
-            md = service.users().messages().get(userId='me', id=m['id'], format='metadata', metadataHeaders=['From', 'Subject', 'Date']).execute()
+            batch.add(service.users().messages().get(
+                userId='me',
+                id=m['id'],
+                format='metadata',
+                metadataHeaders=['From', 'Subject', 'Date']
+            ))
+        batch.execute()
+
+        results = []
+        for md in raw_results:
             headers = {h['name'].lower(): h['value'] for h in md.get('payload', {}).get('headers', [])}
             results.append({
-                "id": m['id'],
+                "id": md.get('id'),
                 "from": headers.get('from', 'Unknown'),
                 "subject": headers.get('subject', '(No Subject)'),
                 "date": headers.get('date', ''),
