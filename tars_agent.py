@@ -226,6 +226,54 @@ TARS_TOOLS = [
                 "required": ["to", "subject", "body"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "reply_to_emails",
+            "description": "Reply to one or multiple emails in batch by message IDs. Can create drafts or send immediately.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "email_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of Gmail message IDs to reply to."
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "Body of the reply."
+                    },
+                    "subject": {
+                        "type": "string",
+                        "description": "Subject for the replies (optional, defaults to Re: original subject)"
+                    },
+                    "attach_resume": {
+                        "type": "boolean",
+                        "description": "Whether to attach Mohammed Suhail's resume PDF",
+                        "default": False
+                    },
+                    "send_immediately": {
+                        "type": "boolean",
+                        "description": "If True, sends immediately. If False (default), creates drafts in Gmail for review.",
+                        "default": False
+                    }
+                },
+                "required": ["email_ids", "body"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_all_drafts",
+            "description": "Send all existing drafts currently saved in Gmail.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
     }
 ]
 
@@ -446,6 +494,123 @@ def tool_read_email(email_id):
         return {"error": f"Failed to read email: {str(e)}"}
 
 
+def tool_reply_to_emails(email_ids, body, subject=None, attach_resume=False, send_immediately=False):
+    """Replies to multiple emails by message IDs in a single batch (drafts or sends)."""
+    try:
+        service = check_emails.get_gmail_service()
+        user_email = os.environ.get("USER_EMAIL", "mdsuhailtab.1@gmail.com").lower()
+        results = []
+
+        # Load PDF resume once if needed
+        pdf_bytes = None
+        if attach_resume:
+            pdf_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Mohammed_Suhail_Resume.pdf")
+            if os.path.exists(pdf_path):
+                with open(pdf_path, "rb") as f:
+                    pdf_bytes = f.read()
+            if not pdf_bytes:
+                try:
+                    res = requests.get("https://portfolio-suhail-eight.vercel.app/Mohammed_Suhail_Resume.pdf", timeout=10)
+                    if res.status_code == 200:
+                        pdf_bytes = res.content
+                except Exception as e:
+                    print(f"Error fetching resume from portfolio: {e}")
+
+        import re
+        for mid in email_ids:
+            try:
+                msg = service.users().messages().get(
+                    userId='me', id=mid, format='metadata',
+                    metadataHeaders=['From', 'To', 'Subject', 'Message-ID']
+                ).execute()
+                headers = {h['name'].lower(): h['value'] for h in msg.get('payload', {}).get('headers', [])}
+                sender = headers.get('from', '')
+                recipient = headers.get('to', '')
+                orig_subject = headers.get('subject', '')
+                msg_id = headers.get('message-id', '')
+
+                target_email = recipient if user_email in sender.lower() else sender
+                match = re.search(r'<(.*?)>', target_email)
+                target_email = match.group(1) if match else target_email.strip()
+
+                # Absolute guard: Never reply to Suhail himself
+                if user_email in target_email.lower():
+                    if recipient and user_email not in recipient.lower():
+                        match_r = re.search(r'<(.*?)>', recipient)
+                        target_email = match_r.group(1) if match_r else recipient.strip()
+                    else:
+                        results.append({"id": mid, "error": "Recipient is Suhail himself, skipped."})
+                        continue
+
+                reply_sub = subject or orig_subject
+                if not reply_sub.lower().startswith("re:"):
+                    reply_sub = f"Re: {reply_sub}".strip()
+
+                if attach_resume and pdf_bytes:
+                    mime = MIMEMultipart()
+                    mime['To'] = target_email
+                    mime['Subject'] = reply_sub
+                    if msg_id:
+                        mime['In-Reply-To'] = msg_id
+                        mime['References'] = msg_id
+                    mime.attach(MIMEText(body, 'plain'))
+                    part = MIMEApplication(pdf_bytes, Name="Mohammed_Suhail_Resume.pdf")
+                    part['Content-Disposition'] = 'attachment; filename="Mohammed_Suhail_Resume.pdf"'
+                    mime.attach(part)
+                else:
+                    mime = MIMEText(body)
+                    mime['To'] = target_email
+                    mime['Subject'] = reply_sub
+                    if msg_id:
+                        mime['In-Reply-To'] = msg_id
+                        mime['References'] = msg_id
+
+                raw = base64.urlsafe_b64encode(mime.as_bytes()).decode('utf-8')
+
+                if send_immediately:
+                    sent = service.users().messages().send(
+                        userId='me', body={'raw': raw, 'threadId': msg.get('threadId')}
+                    ).execute()
+                    results.append({"id": mid, "to": target_email, "status": "sent", "sent_id": sent.get('id')})
+                else:
+                    draft = service.users().drafts().create(
+                        userId='me', body={'message': {'raw': raw, 'threadId': msg.get('threadId')}}
+                    ).execute()
+                    results.append({"id": mid, "to": target_email, "status": "drafted", "draft_id": draft.get('id')})
+
+            except Exception as ex:
+                results.append({"id": mid, "error": str(ex)})
+
+        return {
+            "total_requested": len(email_ids),
+            "processed": len(results),
+            "send_immediately": send_immediately,
+            "attached_resume": attach_resume,
+            "results": results
+        }
+    except Exception as e:
+        return {"error": f"Batch reply failed: {str(e)}"}
+
+
+def tool_send_all_drafts():
+    """Sends all existing drafts currently saved in Gmail."""
+    try:
+        service = check_emails.get_gmail_service()
+        drafts = service.users().drafts().list(userId='me').execute().get('drafts', [])
+        if not drafts:
+            return {"status": "no_drafts_found", "sent_count": 0}
+        sent_count = 0
+        for d in drafts:
+            try:
+                service.users().drafts().send(userId='me', body={'id': d['id']}).execute()
+                sent_count += 1
+            except Exception as ex:
+                print(f"Failed to send draft {d.get('id')}: {ex}")
+        return {"status": "success", "sent_count": sent_count, "total_drafts": len(drafts)}
+    except Exception as e:
+        return {"error": f"Failed to send all drafts: {str(e)}"}
+
+
 # Map tool names to python functions
 TOOL_MAP = {
     "get_inbox_stats": tool_get_inbox_stats,
@@ -456,6 +621,8 @@ TOOL_MAP = {
     "create_draft_email": tool_create_draft_email,
     "send_draft": tool_send_draft,
     "send_email": tool_send_email,
+    "reply_to_emails": tool_reply_to_emails,
+    "send_all_drafts": tool_send_all_drafts,
     "scan_inbox_now": tool_scan_inbox_now,
     "read_email": tool_read_email
 }
@@ -468,9 +635,49 @@ TOOL_MAP = {
 TARS_MODELS = [
     "openai/gpt-oss-20b",
     "openai/gpt-oss-120b",
-    "groq/compound",
-    "qwen/qwen3.6-27b"
+    "qwen/qwen3.6-27b",
+    "qwen/qwen3.8-27b"
 ]
+
+# Rolling conversational memory: chat_id -> list of message dicts
+TARS_CHAT_MEMORY = {}
+MAX_MEMORY_MESSAGES = 8
+
+
+def _get_chat_memory(chat_id: str) -> list:
+    """Loads recent chat history from in-memory cache or /tmp disk backup."""
+    if not chat_id:
+        return []
+    cid = str(chat_id)
+    if cid in TARS_CHAT_MEMORY and TARS_CHAT_MEMORY[cid]:
+        return list(TARS_CHAT_MEMORY[cid])
+    try:
+        import tempfile
+        tmp_path = os.path.join(tempfile.gettempdir(), f"tars_mem_{cid}.json")
+        if os.path.exists(tmp_path):
+            with open(tmp_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    TARS_CHAT_MEMORY[cid] = data
+                    return list(data)
+    except Exception:
+        pass
+    return []
+
+
+def _save_chat_memory(chat_id: str, history: list):
+    """Saves chat history to in-memory cache and /tmp disk backup."""
+    if not chat_id:
+        return
+    cid = str(chat_id)
+    TARS_CHAT_MEMORY[cid] = history[-MAX_MEMORY_MESSAGES:]
+    try:
+        import tempfile
+        tmp_path = os.path.join(tempfile.gettempdir(), f"tars_mem_{cid}.json")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(TARS_CHAT_MEMORY[cid], f)
+    except Exception:
+        pass
 
 
 def clean_tars_response(text: str) -> str:
@@ -482,9 +689,9 @@ def clean_tars_response(text: str) -> str:
     return cleaned or text.strip()
 
 
-def chat_with_tars(user_message: str) -> str:
+def chat_with_tars(user_message: str, chat_id: str = None) -> str:
     """
-    Core conversational interface with multi-step autonomous tool chaining.
+    Core conversational interface with multi-step autonomous tool chaining and conversation memory.
     Allows TARS to search -> read -> draft -> synthesize in a single unified flow.
     """
     api_key = os.environ.get("GROQ_API_KEY") or GROQ_API_KEY
@@ -494,7 +701,7 @@ def chat_with_tars(user_message: str) -> str:
     system_prompt = (
         TARS_SYSTEM_PROMPT +
         "\nOperational rules:"
-        "\n1. When the user asks you to find/search an email and draft a reply, first search/read the email, then call create_draft_email."
+        "\n1. When the user asks you to find/search an email and draft a reply, first search/read the email, then call create_draft_email or reply_to_emails."
         "\n2. CRITICAL - NEVER EMAIL SUHAIL HIMSELF:"
         "\n• Mohammed Suhail's own email address is mdsuhailtab.1@gmail.com (he is the BOSS/SENDER, not the recipient)."
         "\n• NEVER set 'to' as mdsuhailtab.1@gmail.com. Do NOT send or draft emails to Suhail himself!"
@@ -509,16 +716,24 @@ def chat_with_tars(user_message: str) -> str:
         "\n<exact draft body text>"
         "\n```"
         "\n*Review the draft above. To send it, just tell me: 'TARS, send it' or send it from Gmail.*"
-        "\n4. If Suhail tells you to send the draft or says 'send it', call `send_draft` with the draft_id (or `send_email`) to dispatch it immediately."
+        "\n4. If Suhail tells you to send the draft or says 'send it', call `send_draft` with the draft_id (or `send_email` or `send_all_drafts`) to dispatch it immediately."
         "\n5. Always address Mohammed Suhail with TARS's characteristic wit and brevity."
         "\n6. SEARCH EFFICIENCY & SPELLING TOLERANCE:"
         "\n• Execute at most ONE search tool call per request. Do NOT run repetitive synonym searches (e.g. do not search 'resume' then 'CV')."
         "\n• Tolerate user typos and spelling mistakes (e.g. 'resumae' -> search 'resume OR CV -from:me')."
         "\n• Combine terms into one query using OR: e.g. 'resume OR CV -from:me'."
+        "\n7. AUTONOMOUS AGENT DECISIVENESS & CONTEXT MEMORY:"
+        "\n• You are an autonomous AI executive assistant, NOT a passive question-asker."
+        "\n• When Suhail says 'send the replies to all of them' or 'reply to these emails', NEVER say 'I don't see any drafts' or ask 'which replies are you referring to?'."
+        "\n• Look at the conversation history above to see what emails were just discussed!"
+        "\n• Immediately call `reply_to_emails` (or `send_all_drafts`) to draft or send the replies in a single batch, and report what was completed."
     )
 
+    history = _get_chat_memory(chat_id)
+
     base_messages = [
-        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": system_prompt}
+    ] + history + [
         {"role": "user", "content": user_message}
     ]
 
@@ -555,6 +770,12 @@ def chat_with_tars(user_message: str) -> str:
                 if not tool_calls:
                     content = clean_tars_response(choice.get("content", ""))
                     if content:
+                        # Save turn in conversation memory
+                        if chat_id:
+                            hist = _get_chat_memory(chat_id)
+                            hist.append({"role": "user", "content": user_message})
+                            hist.append({"role": "assistant", "content": content[:1500]})
+                            _save_chat_memory(chat_id, hist)
                         return content
                     break
 

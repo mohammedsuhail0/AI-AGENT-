@@ -442,7 +442,7 @@ async def telegram_webhook(request: Request):
                 # If an unrecognized slash command is typed, let TARS respond
                 try:
                     import tars_agent
-                    tars_reply = tars_agent.chat_with_tars(text)
+                    tars_reply = tars_agent.chat_with_tars(text, chat_id=str(user_chat_id))
                     send_telegram_reply(user_chat_id, tars_reply, parse_mode="Markdown")
                     return {"status": "tars_responded"}
                 except Exception:
@@ -463,7 +463,7 @@ async def telegram_webhook(request: Request):
 
             try:
                 import tars_agent
-                tars_reply = tars_agent.chat_with_tars(text)
+                tars_reply = tars_agent.chat_with_tars(text, chat_id=str(user_chat_id))
                 send_telegram_reply(user_chat_id, tars_reply, parse_mode="Markdown")
                 return {"status": "tars_responded"}
             except Exception as e:
