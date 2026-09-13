@@ -304,7 +304,7 @@ def tool_search_emails(query, limit=3):
                 "reply_to": reply_to_target,
                 "subject": headers.get('subject', '(No Subject)'),
                 "date": headers.get('date', ''),
-                "snippet": md.get('snippet', '')
+                "snippet": md.get('snippet', '')[:120]
             })
         return {"query": query, "count": len(results), "results": results}
     except Exception as e:
@@ -468,8 +468,8 @@ TOOL_MAP = {
 TARS_MODELS = [
     "openai/gpt-oss-20b",
     "openai/gpt-oss-120b",
-    "qwen/qwen3.6-27b",
-    "qwen/qwen3.8-27b"
+    "groq/compound",
+    "qwen/qwen3.6-27b"
 ]
 
 
@@ -511,6 +511,10 @@ def chat_with_tars(user_message: str) -> str:
         "\n*Review the draft above. To send it, just tell me: 'TARS, send it' or send it from Gmail.*"
         "\n4. If Suhail tells you to send the draft or says 'send it', call `send_draft` with the draft_id (or `send_email`) to dispatch it immediately."
         "\n5. Always address Mohammed Suhail with TARS's characteristic wit and brevity."
+        "\n6. SEARCH EFFICIENCY & SPELLING TOLERANCE:"
+        "\n• Execute at most ONE search tool call per request. Do NOT run repetitive synonym searches (e.g. do not search 'resume' then 'CV')."
+        "\n• Tolerate user typos and spelling mistakes (e.g. 'resumae' -> search 'resume OR CV -from:me')."
+        "\n• Combine terms into one query using OR: e.g. 'resume OR CV -from:me'."
     )
 
     base_messages = [
