@@ -167,34 +167,39 @@ def send_gmail_reply(service, thread_id, draft_body, attach_resume=False):
 
 
 def send_telegram_reply(chat_id, text, reply_to_message_id=None, parse_mode="HTML"):
-    """Sends a text message back to Telegram."""
+    """Sends a text message back to Telegram safely without sending null parse_mode."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": chat_id,
-        "text": text[:4000],
-        "parse_mode": parse_mode
+        "text": text[:4000]
     }
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     if reply_to_message_id:
         payload["reply_to_message_id"] = reply_to_message_id
+        
     res = requests.post(url, json=payload, timeout=10)
-    if res.status_code != 200 and parse_mode is not None:
-        payload["parse_mode"] = None
+    # If formatting fails, retry immediately with plain text
+    if res.status_code != 200:
+        print(f"Telegram send failed ({res.status_code}): {res.text}. Falling back to plain text.")
+        payload.pop("parse_mode", None)
         requests.post(url, json=payload, timeout=10)
 
 
 def edit_telegram_message(chat_id, message_id, status_text, parse_mode="HTML"):
-    """Updates the original Telegram alert message and removes inline buttons."""
+    """Updates the original Telegram alert message and removes inline buttons safely."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
     payload = {
         "chat_id": chat_id,
         "message_id": message_id,
         "text": status_text[:4000],
-        "parse_mode": parse_mode,
         "reply_markup": json.dumps({"inline_keyboard": []})
     }
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     res = requests.post(url, json=payload, timeout=10)
-    if res.status_code != 200 and parse_mode is not None:
-        payload["parse_mode"] = None
+    if res.status_code != 200:
+        payload.pop("parse_mode", None)
         requests.post(url, json=payload, timeout=10)
 
 
@@ -438,7 +443,7 @@ async def telegram_webhook(request: Request):
                 try:
                     import tars_agent
                     tars_reply = tars_agent.chat_with_tars(text)
-                    send_telegram_reply(user_chat_id, tars_reply, parse_mode=None)
+                    send_telegram_reply(user_chat_id, tars_reply, parse_mode="Markdown")
                     return {"status": "tars_responded"}
                 except Exception:
                     safe_cmd = html.escape(command)
@@ -459,11 +464,11 @@ async def telegram_webhook(request: Request):
             try:
                 import tars_agent
                 tars_reply = tars_agent.chat_with_tars(text)
-                send_telegram_reply(user_chat_id, tars_reply, parse_mode=None)
+                send_telegram_reply(user_chat_id, tars_reply, parse_mode="Markdown")
                 return {"status": "tars_responded"}
             except Exception as e:
                 err_msg = f"⚠️ TARS error: {str(e)}"
-                send_telegram_reply(user_chat_id, err_msg, parse_mode=None)
+                send_telegram_reply(user_chat_id, err_msg, parse_mode="Markdown")
                 return {"status": "error", "reason": str(e)}
 
     return {"status": "ignored", "reason": "unhandled payload type"}

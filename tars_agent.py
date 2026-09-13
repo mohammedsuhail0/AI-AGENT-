@@ -393,7 +393,8 @@ def chat_with_tars(user_message: str) -> str:
     Sends message to Groq with TARS persona and tool-calling capabilities.
     Executes tools if requested and returns TARS's final formatted response.
     """
-    if not GROQ_API_KEY:
+    api_key = os.environ.get("GROQ_API_KEY") or GROQ_API_KEY
+    if not api_key:
         return "⚠️ TARS offline: GROQ_API_KEY missing from environment."
 
     messages = [
@@ -406,7 +407,7 @@ def chat_with_tars(user_message: str) -> str:
             curr_messages = list(messages)
             url = "https://api.groq.com/openai/v1/chat/completions"
             headers = {
-                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json"
             }
             payload = {
