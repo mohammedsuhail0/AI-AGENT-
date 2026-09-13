@@ -1,12 +1,11 @@
 {
   "name": "personal-email-agent",
   "version": 2,
-  "builds": [
-    {
-      "src": "api/telegram_webhook.py",
-      "use": "@vercel/python"
+  "functions": {
+    "api/telegram_webhook.py": {
+      "maxDuration": 60
     }
-  ],
+  },
   "routes": [
     {
       "src": "/api/telegram_webhook",

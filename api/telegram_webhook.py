@@ -456,6 +456,15 @@ async def telegram_webhook(request: Request):
         else:
             # Natural language message -> Conversational TARS!
             try:
+                requests.post(
+                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendChatAction",
+                    json={"chat_id": user_chat_id, "action": "typing"},
+                    timeout=3
+                )
+            except Exception:
+                pass
+
+            try:
                 import tars_agent
                 tars_reply = tars_agent.chat_with_tars(text)
                 send_telegram_reply(user_chat_id, tars_reply, parse_mode=None)
