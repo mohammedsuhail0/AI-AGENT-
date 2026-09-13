@@ -389,96 +389,90 @@ def clean_tars_response(text: str) -> str:
 
 def chat_with_tars(user_message: str) -> str:
     """
-    Core conversational interface.
-    Sends message to Groq with TARS persona and tool-calling capabilities.
-    Executes tools if requested and returns TARS's final formatted response.
+    Core conversational interface with multi-step autonomous tool chaining.
+    Allows TARS to search -> read -> draft -> synthesize in a single unified flow.
     """
     api_key = os.environ.get("GROQ_API_KEY") or GROQ_API_KEY
     if not api_key:
         return "⚠️ TARS offline: GROQ_API_KEY missing from environment."
 
-    messages = [
-        {"role": "system", "content": TARS_SYSTEM_PROMPT + "\nNote: When searching emails or checking stats, execute at most ONE tool call. Do not chain multiple searches."},
+    system_prompt = (
+        TARS_SYSTEM_PROMPT +
+        "\nOperational rules:"
+        "\n1. When the user asks you to find/search an email and then draft/reply, first search/read the email, then call create_draft_email, then report your action."
+        "\n2. Always address Mohammed Suhail with TARS's characteristic wit and brevity."
+    )
+
+    base_messages = [
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_message}
     ]
 
     for model in TARS_MODELS:
         try:
-            curr_messages = list(messages)
+            curr_messages = list(base_messages)
             url = "https://api.groq.com/openai/v1/chat/completions"
             headers = {
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json"
             }
-            payload = {
-                "model": model,
-                "messages": curr_messages,
-                "tools": TARS_TOOLS,
-                "tool_choice": "auto",
-                "max_tokens": 800,
-                "temperature": 0.5
-            }
 
-            resp = requests.post(url, headers=headers, json=payload, timeout=8)
-            if resp.status_code != 200:
-                print(f"Groq error ({model}): {resp.status_code} - {resp.text}")
-                continue
+            max_steps = 4
+            for step in range(max_steps):
+                payload = {
+                    "model": model,
+                    "messages": curr_messages,
+                    "tools": TARS_TOOLS,
+                    "tool_choice": "auto",
+                    "max_tokens": 800,
+                    "temperature": 0.5
+                }
 
-            resp_data = resp.json()
-            choice = resp_data.get("choices", [{}])[0].get("message", {})
-            tool_calls = choice.get("tool_calls", [])
+                resp = requests.post(url, headers=headers, json=payload, timeout=12)
+                if resp.status_code != 200:
+                    print(f"Groq error ({model}) step {step}: {resp.status_code} - {resp.text}")
+                    break  # Failover to next model
 
-            # If no tool call needed, return TARS's direct response immediately (~0.8s)
-            if not tool_calls:
-                content = clean_tars_response(choice.get("content", ""))
-                if content:
-                    return content
-                continue
+                resp_data = resp.json()
+                choice = resp_data.get("choices", [{}])[0].get("message", {})
+                tool_calls = choice.get("tool_calls", [])
 
-            # Execute the primary tool call
-            curr_messages.append(choice)
-            tc = tool_calls[0]
-            fn_name = tc.get("function", {}).get("name")
-            fn_args_raw = tc.get("function", {}).get("arguments", "{}")
-            try:
-                fn_args = json.loads(fn_args_raw)
-            except Exception:
-                fn_args = {}
+                # If no further tools requested, we have TARS's final answer!
+                if not tool_calls:
+                    content = clean_tars_response(choice.get("content", ""))
+                    if content:
+                        return content
+                    break
 
-            print(f"TARS executing tool: {fn_name}({fn_args})")
-            handler = TOOL_MAP.get(fn_name)
-            if handler:
-                result = handler(**fn_args)
-            else:
-                result = {"error": f"Unknown tool '{fn_name}'"}
+                # Execute all requested tool calls in this step
+                curr_messages.append(choice)
+                for tc in tool_calls:
+                    fn_name = tc.get("function", {}).get("name")
+                    fn_args_raw = tc.get("function", {}).get("arguments", "{}")
+                    try:
+                        fn_args = json.loads(fn_args_raw)
+                    except Exception:
+                        fn_args = {}
 
-            curr_messages.append({
-                "role": "tool",
-                "tool_call_id": tc.get("id", "call_0"),
-                "name": fn_name,
-                "content": json.dumps(result)
-            })
+                    print(f"TARS step {step}: executing {fn_name}({fn_args})")
+                    handler = TOOL_MAP.get(fn_name)
+                    if handler:
+                        result = handler(**fn_args)
+                    else:
+                        result = {"error": f"Unknown tool '{fn_name}'"}
 
-            # Send tool results back to Groq for final persona delivery (MUST include tools)
-            followup_payload = {
-                "model": model,
-                "messages": curr_messages,
-                "tools": TARS_TOOLS,
-                "max_tokens": 800,
-                "temperature": 0.5
-            }
-            followup_resp = requests.post(url, headers=headers, json=followup_payload, timeout=8)
-            if followup_resp.status_code == 200:
-                final_msg = followup_resp.json().get("choices", [{}])[0].get("message", {})
-                final_content = clean_tars_response(final_msg.get("content", ""))
-                if final_content:
-                    return final_content
+                    curr_messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.get("id", "call_0"),
+                        "name": fn_name,
+                        "content": json.dumps(result)
+                    })
 
         except Exception as e:
             print(f"TARS chat exception on model {model}: {e}")
             continue
 
-    # Fallback if all models or timeouts occur
+    # Fallback if all models fail
     return (
         f"Honesty 90%, Humor 75%: My neural link took a momentary hit, Suhail. "
         "Either Groq is catching its breath or a sub-space anomaly occurred. Give me another prompt."
