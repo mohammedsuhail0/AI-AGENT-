@@ -188,6 +188,44 @@ TARS_TOOLS = [
                 "required": ["email_id"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_draft",
+            "description": "Send an existing Gmail draft by its draft ID when Suhail approves it.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "draft_id": {
+                        "type": "string",
+                        "description": "The Gmail draft ID to send."
+                    }
+                },
+                "required": ["draft_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_email",
+            "description": "Send an email immediately via Gmail to a recipient.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "to": {"type": "string", "description": "Recipient email address"},
+                    "subject": {"type": "string", "description": "Subject line"},
+                    "body": {"type": "string", "description": "Body of the email in plain text"},
+                    "attach_resume": {
+                        "type": "boolean",
+                        "description": "Whether to attach Mohammed Suhail's resume PDF",
+                        "default": False
+                    }
+                },
+                "required": ["to", "subject", "body"]
+            }
+        }
     }
 ]
 
@@ -317,11 +355,49 @@ def tool_create_draft_email(to, subject, body, attach_resume=False):
             "draft_id": draft.get('id'),
             "to": to,
             "subject": subject,
+            "body": body,
             "attached_resume": attach_resume,
             "status": "draft_created_in_gmail"
         }
     except Exception as e:
         return {"error": f"Draft creation failed: {str(e)}"}
+
+
+def tool_send_draft(draft_id):
+    """Sends an existing draft in Gmail using its draft ID."""
+    try:
+        service = check_emails.get_gmail_service()
+        res = service.users().drafts().send(userId='me', body={'id': draft_id}).execute()
+        return {"status": "email_sent_successfully", "message_id": res.get('id')}
+    except Exception as e:
+        return {"error": f"Failed to send draft: {str(e)}"}
+
+
+def tool_send_email(to, subject, body, attach_resume=False):
+    """Sends an email directly through Gmail."""
+    try:
+        service = check_emails.get_gmail_service()
+        if attach_resume:
+            msg = MIMEMultipart()
+            msg['To'] = to
+            msg['Subject'] = subject
+            msg.attach(MIMEText(body, 'plain'))
+            pdf_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Mohammed_Suhail_Resume.pdf")
+            if os.path.exists(pdf_path):
+                with open(pdf_path, "rb") as f:
+                    part = MIMEApplication(f.read(), Name="Mohammed_Suhail_Resume.pdf")
+                    part['Content-Disposition'] = 'attachment; filename="Mohammed_Suhail_Resume.pdf"'
+                    msg.attach(part)
+        else:
+            msg = MIMEText(body)
+            msg['To'] = to
+            msg['Subject'] = subject
+
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode('utf-8')
+        sent = service.users().messages().send(userId='me', body={'raw': raw}).execute()
+        return {"status": "email_sent_successfully", "message_id": sent.get('id'), "to": to}
+    except Exception as e:
+        return {"error": f"Failed to send email: {str(e)}"}
 
 
 def tool_scan_inbox_now():
@@ -361,6 +437,8 @@ TOOL_MAP = {
     "check_calendar": tool_check_calendar,
     "clean_promotions": tool_clean_promotions,
     "create_draft_email": tool_create_draft_email,
+    "send_draft": tool_send_draft,
+    "send_email": tool_send_email,
     "scan_inbox_now": tool_scan_inbox_now,
     "read_email": tool_read_email
 }
@@ -399,8 +477,19 @@ def chat_with_tars(user_message: str) -> str:
     system_prompt = (
         TARS_SYSTEM_PROMPT +
         "\nOperational rules:"
-        "\n1. When the user asks you to find/search an email and then draft/reply, first search/read the email, then call create_draft_email, then report your action."
-        "\n2. Always address Mohammed Suhail with TARS's characteristic wit and brevity."
+        "\n1. When the user asks you to find/search an email and draft a reply, first search/read the email, then call create_draft_email."
+        "\n2. CRITICAL: Whenever you create a draft, you MUST ALWAYS display the complete draft preview directly in your Telegram response so Suhail can review it right here! Format it clearly:"
+        "\n📩 **Draft Created in Gmail**"
+        "\n• **To:** <recipient>"
+        "\n• **Subject:** <subject>"
+        "\n• **Resume Attached:** <Yes/No>"
+        "\n• **Draft ID:** `<draft_id>`"
+        "\n\n```"
+        "\n<exact draft body text>"
+        "\n```"
+        "\n*Review the draft above. To send it, just tell me: 'TARS, send it' or send it from Gmail.*"
+        "\n3. If Suhail tells you to send the draft or says 'send it', call `send_draft` with the draft_id (or `send_email`) to dispatch it immediately."
+        "\n4. Always address Mohammed Suhail with TARS's characteristic wit and brevity."
     )
 
     base_messages = [
