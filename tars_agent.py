@@ -633,10 +633,10 @@ TOOL_MAP = {
 # ==========================================
 
 TARS_MODELS = [
-    "openai/gpt-oss-20b",
-    "openai/gpt-oss-120b",
     "qwen/qwen3.6-27b",
-    "qwen/qwen3.8-27b"
+    "qwen/qwen3.8-27b",
+    "openai/gpt-oss-20b",
+    "openai/gpt-oss-120b"
 ]
 
 # Rolling conversational memory: chat_id -> list of message dicts
@@ -747,6 +747,7 @@ def chat_with_tars(user_message: str, chat_id: str = None) -> str:
             }
 
             max_steps = 4
+            search_count = 0
             for step in range(max_steps):
                 payload = {
                     "model": model,
@@ -788,6 +789,19 @@ def chat_with_tars(user_message: str, chat_id: str = None) -> str:
                         fn_args = json.loads(fn_args_raw)
                     except Exception:
                         fn_args = {}
+
+                    # Prevent repetitive search loops within a single turn
+                    if fn_name == "search_emails":
+                        if search_count >= 1:
+                            result = {"status": "search_completed", "message": "Search already conducted above. Synthesize your final answer now without searching again."}
+                            curr_messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc.get("id", "call_0"),
+                                "name": fn_name,
+                                "content": json.dumps(result)
+                            })
+                            continue
+                        search_count += 1
 
                     print(f"TARS step {step}: executing {fn_name}({fn_args})")
                     handler = TOOL_MAP.get(fn_name)
