@@ -61,31 +61,20 @@ TARS_TOOLS = [
         "type": "function",
         "function": {
             "name": "get_inbox_stats",
-            "description": "Get real-time counts of unread emails, total inbox emails, spam, and trash in Gmail.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
+            "description": "Get real-time counts of unread, total, spam, and trash in Gmail.",
+            "parameters": {"type": "object", "properties": {}}
         }
     },
     {
         "type": "function",
         "function": {
             "name": "search_emails",
-            "description": "Search Gmail for messages matching a keyword, sender, or query (e.g. 'hackathon', 'ISL', 'interview', 'C3', 'from:google').",
+            "description": "Search Gmail messages (e.g. 'ISL', 'C3 -from:me', 'interview', 'from:google').",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "The search keyword (e.g. 'ISL', 'hackathon', 'C3', 'interview'). To find incoming emails from external people to reply to, use '-from:me' (e.g. 'C3 -from:me')."
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Maximum number of emails to retrieve (default 3)",
-                        "default": 3
-                    }
+                    "query": {"type": "string", "description": "Search query or keyword"},
+                    "limit": {"type": "integer", "description": "Max results (default 3)", "default": 3}
                 },
                 "required": ["query"]
             }
@@ -95,80 +84,12 @@ TARS_TOOLS = [
         "type": "function",
         "function": {
             "name": "get_recent_unread_emails",
-            "description": "Get the most recent unread emails in the inbox with sender, subject, and preview snippet.",
+            "description": "Get the most recent unread emails in the inbox.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "limit": {
-                        "type": "integer",
-                        "description": "Number of unread emails to retrieve (default 5)",
-                        "default": 5
-                    }
-                },
-                "required": []
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "check_calendar",
-            "description": "Check upcoming Google Calendar events and availability slots.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "clean_promotions",
-            "description": "Purges and moves marketing, promotional, and newsletter emails to the Trash.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "limit": {
-                        "type": "integer",
-                        "description": "Maximum number of promotional emails to clean (default 100)",
-                        "default": 100
-                    }
-                },
-                "required": []
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "create_draft_email",
-            "description": "Create a new draft in Gmail addressed to a recipient with subject and body.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "to": {"type": "string", "description": "Recipient email address"},
-                    "subject": {"type": "string", "description": "Subject line"},
-                    "body": {"type": "string", "description": "Body of the draft in plain text"},
-                    "attach_resume": {
-                        "type": "boolean",
-                        "description": "Whether to attach Mohammed Suhail's resume PDF",
-                        "default": False
-                    }
-                },
-                "required": ["to", "subject", "body"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "scan_inbox_now",
-            "description": "Trigger an immediate perimeter scan of the inbox for new urgent emails.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": []
+                    "limit": {"type": "integer", "description": "Number of emails (default 5)", "default": 5}
+                }
             }
         }
     },
@@ -176,14 +97,11 @@ TARS_TOOLS = [
         "type": "function",
         "function": {
             "name": "read_email",
-            "description": "Read the full text content and details of a specific email using its message ID.",
+            "description": "Read the full text content and details of an email by message ID.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "email_id": {
-                        "type": "string",
-                        "description": "The unique Gmail message ID (e.g. from search_emails or get_recent_unread_emails)."
-                    }
+                    "email_id": {"type": "string", "description": "Gmail message ID"}
                 },
                 "required": ["email_id"]
             }
@@ -192,36 +110,78 @@ TARS_TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "send_draft",
-            "description": "Send an existing Gmail draft by its draft ID when Suhail approves it.",
+            "name": "check_calendar",
+            "description": "Check upcoming Google Calendar events and availability slots.",
+            "parameters": {"type": "object", "properties": {}}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "clean_promotions",
+            "description": "Purge promotional, newsletter, and marketing emails to Trash.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "draft_id": {
-                        "type": "string",
-                        "description": "The Gmail draft ID to send."
-                    }
-                },
-                "required": ["draft_id"]
+                    "limit": {"type": "integer", "description": "Max to purge (default 100)", "default": 100}
+                }
             }
         }
     },
     {
         "type": "function",
         "function": {
-            "name": "send_email",
-            "description": "Send an email immediately via Gmail to a recipient.",
+            "name": "archive_emails",
+            "description": "Archive emails out of INBOX (Inbox Zero).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "email_ids": {"type": "array", "items": {"type": "string"}, "description": "List of Gmail message IDs"}
+                },
+                "required": ["email_ids"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "trash_emails",
+            "description": "Move unwanted emails or spam to Gmail Trash.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "email_ids": {"type": "array", "items": {"type": "string"}, "description": "List of Gmail message IDs"}
+                },
+                "required": ["email_ids"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "mark_as_read",
+            "description": "Mark unread emails as read.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "email_ids": {"type": "array", "items": {"type": "string"}, "description": "List of Gmail message IDs"}
+                },
+                "required": ["email_ids"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_draft_email",
+            "description": "Create a new draft in Gmail with live preview.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "to": {"type": "string", "description": "Recipient email address"},
                     "subject": {"type": "string", "description": "Subject line"},
-                    "body": {"type": "string", "description": "Body of the email in plain text"},
-                    "attach_resume": {
-                        "type": "boolean",
-                        "description": "Whether to attach Mohammed Suhail's resume PDF",
-                        "default": False
-                    }
+                    "body": {"type": "string", "description": "Body text"},
+                    "attach_resume": {"type": "boolean", "default": False}
                 },
                 "required": ["to", "subject", "body"]
             }
@@ -231,37 +191,16 @@ TARS_TOOLS = [
         "type": "function",
         "function": {
             "name": "reply_to_emails",
-            "description": "Reply to one or multiple emails with 100% personalized, contextual responses tailored to each sender's specific email content. Can create drafts or send immediately.",
+            "description": "Reply to one or multiple emails with personalized, contextual responses tailored to each sender.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "email_ids": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "List of Gmail message IDs to reply to."
-                    },
-                    "instruction": {
-                        "type": "string",
-                        "description": "Guidance on how to reply (e.g. 'answer their questions about C3', 'schedule a call for tomorrow', 'thank them'). Each email will have a uniquely written response addressing its specific content."
-                    },
-                    "body": {
-                        "type": "string",
-                        "description": "Optional specific reply body if replying to a single email."
-                    },
-                    "subject": {
-                        "type": "string",
-                        "description": "Subject for the replies (optional, defaults to Re: original subject)"
-                    },
-                    "attach_resume": {
-                        "type": "boolean",
-                        "description": "Whether to attach Mohammed Suhail's resume PDF",
-                        "default": False
-                    },
-                    "send_immediately": {
-                        "type": "boolean",
-                        "description": "If True, sends immediately. If False (default), creates drafts in Gmail for review.",
-                        "default": False
-                    }
+                    "email_ids": {"type": "array", "items": {"type": "string"}, "description": "Gmail message IDs"},
+                    "instruction": {"type": "string", "description": "Goal/direction for reply"},
+                    "body": {"type": "string", "description": "Optional custom body"},
+                    "subject": {"type": "string", "description": "Optional subject"},
+                    "attach_resume": {"type": "boolean", "default": False},
+                    "send_immediately": {"type": "boolean", "default": False}
                 },
                 "required": ["email_ids"]
             }
@@ -270,13 +209,48 @@ TARS_TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "send_all_drafts",
-            "description": "Send all existing drafts currently saved in Gmail.",
+            "name": "send_draft",
+            "description": "Send an existing Gmail draft by draft ID.",
             "parameters": {
                 "type": "object",
-                "properties": {},
-                "required": []
+                "properties": {
+                    "draft_id": {"type": "string", "description": "Gmail draft ID"}
+                },
+                "required": ["draft_id"]
             }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_email",
+            "description": "Send an email immediately via Gmail.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "to": {"type": "string"},
+                    "subject": {"type": "string"},
+                    "body": {"type": "string"},
+                    "attach_resume": {"type": "boolean", "default": False}
+                },
+                "required": ["to", "subject", "body"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_all_drafts",
+            "description": "Send all existing drafts currently saved in Gmail.",
+            "parameters": {"type": "object", "properties": {}}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "scan_inbox_now",
+            "description": "Scan inbox now for urgent emails.",
+            "parameters": {"type": "object", "properties": {}}
         }
     }
 ]
@@ -535,7 +509,7 @@ Return ONLY the reply text, with no quotes or explanations.
     if api_key:
         url = "https://api.groq.com/openai/v1/chat/completions"
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-        for model in ["qwen/qwen3.6-27b", "openai/gpt-oss-20b"]:
+        for model in ["qwen/qwen3.8-27b", "openai/gpt-oss-20b"]:
             try:
                 resp = requests.post(url, headers=headers, json={
                     "model": model,
@@ -694,6 +668,48 @@ def tool_send_all_drafts():
         return {"error": f"Failed to send all drafts: {str(e)}"}
 
 
+def tool_archive_emails(email_ids):
+    """Archives emails out of the INBOX (Inbox Zero)."""
+    try:
+        service = check_emails.get_gmail_service()
+        service.users().messages().batchModify(
+            userId='me',
+            body={'ids': email_ids, 'removeLabelIds': ['INBOX']}
+        ).execute()
+        return {"status": "success", "archived_count": len(email_ids), "email_ids": email_ids}
+    except Exception as e:
+        return {"error": f"Failed to archive emails: {str(e)}"}
+
+
+def tool_trash_emails(email_ids):
+    """Moves specified emails to Gmail Trash."""
+    try:
+        service = check_emails.get_gmail_service()
+        trashed = 0
+        for mid in email_ids:
+            try:
+                service.users().messages().trash(userId='me', id=mid).execute()
+                trashed += 1
+            except Exception as ex:
+                print(f"Failed to trash {mid}: {ex}")
+        return {"status": "success", "trashed_count": trashed, "total_requested": len(email_ids)}
+    except Exception as e:
+        return {"error": f"Failed to trash emails: {str(e)}"}
+
+
+def tool_mark_as_read(email_ids):
+    """Marks specified emails as read by removing the UNREAD label."""
+    try:
+        service = check_emails.get_gmail_service()
+        service.users().messages().batchModify(
+            userId='me',
+            body={'ids': email_ids, 'removeLabelIds': ['UNREAD']}
+        ).execute()
+        return {"status": "success", "marked_read_count": len(email_ids), "email_ids": email_ids}
+    except Exception as e:
+        return {"error": f"Failed to mark emails as read: {str(e)}"}
+
+
 # Map tool names to python functions
 TOOL_MAP = {
     "get_inbox_stats": tool_get_inbox_stats,
@@ -706,6 +722,9 @@ TOOL_MAP = {
     "send_email": tool_send_email,
     "reply_to_emails": tool_reply_to_emails,
     "send_all_drafts": tool_send_all_drafts,
+    "archive_emails": tool_archive_emails,
+    "trash_emails": tool_trash_emails,
+    "mark_as_read": tool_mark_as_read,
     "scan_inbox_now": tool_scan_inbox_now,
     "read_email": tool_read_email
 }
@@ -716,7 +735,6 @@ TOOL_MAP = {
 # ==========================================
 
 TARS_MODELS = [
-    "qwen/qwen3.6-27b",
     "qwen/qwen3.8-27b",
     "openai/gpt-oss-20b",
     "openai/gpt-oss-120b"
@@ -724,7 +742,7 @@ TARS_MODELS = [
 
 # Rolling conversational memory: chat_id -> list of message dicts
 TARS_CHAT_MEMORY = {}
-MAX_MEMORY_MESSAGES = 8
+MAX_MEMORY_MESSAGES = 4
 
 
 def _get_chat_memory(chat_id: str) -> list:
@@ -784,12 +802,20 @@ def chat_with_tars(user_message: str, chat_id: str = None) -> str:
     system_prompt = (
         TARS_SYSTEM_PROMPT +
         "\nOperational rules:"
-        "\n1. When the user asks you to find/search an email and draft a reply, first search/read the email, then call create_draft_email or reply_to_emails."
-        "\n2. CRITICAL - NEVER EMAIL SUHAIL HIMSELF:"
+        "\n1. DEFAULT TO EXECUTIVE TRIAGE (NEVER ASSUME EVERY EMAIL NEEDS A REPLY):"
+        "\n• When Suhail asks you to find, search, or check emails, your job is to SUMMARIZE and ASSESS."
+        "\n• Report what the emails are, who sent them, and whether any response is actually necessary."
+        "\n• DO NOT draft or send replies unless Suhail explicitly instructs you to reply (e.g. 'reply to this', 'send reply', 'draft an answer') OR an email is an urgent direct question expecting an immediate answer."
+        "\n• For newsletters, receipts, announcements, or notifications: offer to archive them (`archive_emails`) or trash them (`trash_emails`) instead of replying."
+        "\n2. FULL INBOX ACTION CONTROLS (ARCHIVE, TRASH, MARK AS READ):"
+        "\n• You have full access to `archive_emails`, `trash_emails`, and `mark_as_read`."
+        "\n• When Suhail says 'archive these', 'clean these', 'trash these', or 'mark as read', use the appropriate tool immediately to keep his inbox clean."
+        "\n3. CRITICAL - NEVER EMAIL SUHAIL HIMSELF:"
         "\n• Mohammed Suhail's own email address is mdsuhailtab.1@gmail.com (he is the BOSS/SENDER, not the recipient)."
         "\n• NEVER set 'to' as mdsuhailtab.1@gmail.com. Do NOT send or draft emails to Suhail himself!"
         "\n• When replying to an email, ALWAYS set 'to' as the EXTERNAL sender/contact (e.g. webclient07@gmail.com, mrstrange25502@gmail.com, etc.), using the 'reply_to' field provided by the email tools."
-        "\n3. Whenever you create a draft, you MUST ALWAYS display the complete draft preview directly in your Telegram response so Suhail can review it right here! Format it clearly:"
+        "\n4. DRAFT PREVIEW DIRECTLY IN TELEGRAM:"
+        "\n• Whenever you create a draft, you MUST ALWAYS display the complete draft preview directly in your Telegram response so Suhail can review it right here! Format it clearly:"
         "\n📩 **Draft Created in Gmail**"
         "\n• **To:** <external recipient>"
         "\n• **Subject:** <subject>"
@@ -799,18 +825,18 @@ def chat_with_tars(user_message: str, chat_id: str = None) -> str:
         "\n<exact draft body text>"
         "\n```"
         "\n*Review the draft above. To send it, just tell me: 'TARS, send it' or send it from Gmail.*"
-        "\n4. If Suhail tells you to send the draft or says 'send it', call `send_draft` with the draft_id (or `send_email` or `send_all_drafts`) to dispatch it immediately."
-        "\n5. Always address Mohammed Suhail with TARS's characteristic wit and brevity."
-        "\n6. SEARCH EFFICIENCY & SPELLING TOLERANCE:"
+        "\n5. If Suhail tells you to send the draft or says 'send it', call `send_draft` with the draft_id (or `send_email` or `send_all_drafts`) to dispatch it immediately."
+        "\n6. Always address Mohammed Suhail with TARS's characteristic wit and brevity."
+        "\n7. SEARCH EFFICIENCY & SPELLING TOLERANCE:"
         "\n• Execute at most ONE search tool call per request. Do NOT run repetitive synonym searches (e.g. do not search 'resume' then 'CV')."
         "\n• Tolerate user typos and spelling mistakes (e.g. 'resumae' -> search 'resume OR CV -from:me')."
         "\n• Combine terms into one query using OR: e.g. 'resume OR CV -from:me'."
-        "\n7. AUTONOMOUS AGENT DECISIVENESS & CONTEXT MEMORY:"
+        "\n8. AUTONOMOUS AGENT DECISIVENESS & CONTEXT MEMORY:"
         "\n• You are an autonomous AI executive assistant, NOT a passive question-asker."
         "\n• When Suhail says 'send the replies to all of them' or 'reply to these emails', NEVER say 'I don't see any drafts' or ask 'which replies are you referring to?'."
         "\n• Look at the conversation history above to see what emails were just discussed!"
         "\n• Immediately call `reply_to_emails` (or `send_all_drafts`) to draft or send the replies in a single batch, and report what was completed."
-        "\n8. DYNAMIC CONTEXTUAL REPLIES (ZERO CANNED RESPONSES):"
+        "\n9. DYNAMIC CONTEXTUAL REPLIES (ZERO CANNED RESPONSES):"
         "\n• Mohammed Suhail strictly forbids generic, robotic, or copy-pasted boilerplate template replies."
         "\n• Every email you reply to MUST be uniquely tailored to what that specific sender actually said in their email."
         "\n• Address their specific questions, context, and nuance directly. Never repeat the same generic paragraph across different emails."
@@ -848,6 +874,9 @@ def chat_with_tars(user_message: str, chat_id: str = None) -> str:
                 resp = requests.post(url, headers=headers, json=payload, timeout=12)
                 if resp.status_code != 200:
                     print(f"Groq error ({model}) step {step}: {resp.status_code} - {resp.text}")
+                    if resp.status_code == 429:
+                        import time
+                        time.sleep(2)
                     break  # Failover to next model
 
                 resp_data = resp.json()
@@ -862,7 +891,7 @@ def chat_with_tars(user_message: str, chat_id: str = None) -> str:
                         if chat_id:
                             hist = _get_chat_memory(chat_id)
                             hist.append({"role": "user", "content": user_message})
-                            hist.append({"role": "assistant", "content": content[:1500]})
+                            hist.append({"role": "assistant", "content": content[:600]})
                             _save_chat_memory(chat_id, hist)
                         return content
                     break
