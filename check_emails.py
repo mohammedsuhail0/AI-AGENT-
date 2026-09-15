@@ -36,15 +36,17 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 # Resilient Model Failover List
-PRIMARY_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")
+PRIMARY_MODEL = os.environ.get("GROQ_MODEL", "qwen/qwen3.8-27b")
 GROQ_MODELS = [
     PRIMARY_MODEL,
-    "groq/compound-mini",
-    "qwen/qwen3.6-27b",
+    "qwen/qwen3.8-27b",
+    "openai/gpt-oss-20b",
+    "openai/gpt-oss-120b",
     "llama-3.3-70b-versatile"
 ]
 # Remove duplicates while preserving priority order
 GROQ_MODELS = list(dict.fromkeys([m for m in GROQ_MODELS if m]))
+
 
 STUDENT_PROFILE = os.environ.get(
     "STUDENT_PROFILE",
@@ -310,6 +312,8 @@ def call_groq_api(system_prompt, user_prompt, json_mode=False):
             elif response.status_code in [404, 429, 500, 502, 503]:
                 print(f"Groq warning: Model '{model}' returned status {response.status_code}. Trying fallback...")
                 last_error = f"{model} status {response.status_code}: {response.text}"
+                if response.status_code == 429:
+                    time.sleep(2)
                 continue
             else:
                 last_error = f"{model} status {response.status_code}: {response.text}"
@@ -322,7 +326,48 @@ def call_groq_api(system_prompt, user_prompt, json_mode=False):
     raise Exception(f"All Groq models failed. Last error: {last_error}")
 
 
+def generate_contextual_reply(sender, subject, body, calendar_context=""):
+    """
+    Generates an authentic, uniquely tailored contextual reply as Mohammed Suhail.
+    Reads the sender's actual email body and directly answers their specific questions.
+    Never uses canned or boilerplate copy-paste templates.
+    """
+    system_prompt = (
+        "You are Mohammed Suhail, B.Tech IT student (Class of 2028) at ISL Engineering College, Hyderabad, "
+        "and President/Founder of C3 (Claude Code & Cowork) Club.\n"
+        "You are writing a personalized, direct email reply to an incoming message.\n"
+        "CRITICAL RULES:\n"
+        "1. Read the sender's email carefully and directly answer their specific questions, comments, or requests.\n"
+        "2. NEVER use generic, canned, or boilerplate copy-pasted responses. Every reply must be uniquely crafted for this specific email.\n"
+        "3. If they ask about C3, answer ONLY what they specifically inquired about (e.g. joining, tech stack, meetings), without giving a generic elevator pitch.\n"
+        "4. If they ask to meet or talk, propose a time between 10:00 AM - 8:00 PM IST or offer Google Meet.\n"
+        "5. Sign off cleanly as:\n"
+        "Best regards,\n"
+        "Mohammed Suhail\n"
+        "(NEVER include website links, portfolio URLs, or promotional lines in signature)."
+    )
+    user_prompt = f"""
+    INCOMING EMAIL:
+    From: {sender}
+    Subject: {subject}
+    Body:
+    {body}
+
+    Upcoming Calendar Context:
+    {calendar_context}
+
+    Write a natural, authentic, and direct reply to this specific email:
+    """
+    try:
+        reply = call_groq_api(system_prompt, user_prompt, json_mode=False)
+        return reply.strip()
+    except Exception as e:
+        print(f"Failed to generate contextual reply: {e}")
+        return ""
+
+
 def classify_email(sender, subject, body, calendar_context):
+
     """Uses Groq with structured outputs to categorize the email, check calendar, and draft a reply."""
     system_prompt = f"""
     You are the personal AI email assistant for Mohammed Suhail. 
@@ -681,18 +726,15 @@ def main(max_emails=10, sleep_between=True):
             attach_resume = analysis.get("attach_resume", False)
             draft = analysis.get("draft_reply", "")
 
-            # Safeguard: If resume requested or direct human inquiry about C3, force URGENT
+            # Safeguard: If resume requested or direct human inquiry about C3/projects, force URGENT
             if attach_resume or ("c3" in body_truncated.lower() and "?" in body_truncated):
                 category = "URGENT"
-                if not draft:
-                    draft = (
-                        "Hi,\n\n"
-                        "Thank you for reaching out! C3 (Claude Code & Cowork) is our club at ISL Engineering College "
-                        "where we learn prompt engineering, modern development with Claude Code, and ship real working prototypes every week.\n\n"
-                        "Please let me know if you'd like to connect or discuss further!\n\n"
-                        "Best regards,\n"
-                        "Mohammed Suhail"
-                    )
+
+            # If URGENT and no draft was returned by classifier, generate a 100% contextual draft from the email body
+            if category == "URGENT" and not draft:
+                print(f"Draft is empty for URGENT email. Generating contextual reply for '{subject}'...")
+                draft = generate_contextual_reply(sender, subject, body_truncated, calendar_context)
+
 
             print(f"AI Category: {category} | Reason: {reason}")
             

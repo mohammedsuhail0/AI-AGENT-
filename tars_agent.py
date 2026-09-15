@@ -509,7 +509,7 @@ Return ONLY the reply text, with no quotes or explanations.
     if api_key:
         url = "https://api.groq.com/openai/v1/chat/completions"
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-        for model in ["qwen/qwen3.8-27b", "openai/gpt-oss-20b"]:
+        for model in ["qwen/qwen3.8-27b", "openai/gpt-oss-20b", "openai/gpt-oss-120b", "llama-3.3-70b-versatile"]:
             try:
                 resp = requests.post(url, headers=headers, json={
                     "model": model,
@@ -521,8 +521,12 @@ Return ONLY the reply text, with no quotes or explanations.
                     text = clean_tars_response(resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")).strip()
                     if text:
                         return text
+                elif resp.status_code == 429:
+                    import time
+                    time.sleep(2)
             except Exception as e:
                 print(f"Failed to generate contextual reply via {model}: {e}")
+
 
     return (
         f"Hi,\n\n"
