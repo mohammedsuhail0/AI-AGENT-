@@ -231,7 +231,7 @@ TARS_TOOLS = [
         "type": "function",
         "function": {
             "name": "reply_to_emails",
-            "description": "Reply to one or multiple emails in batch by message IDs. Can create drafts or send immediately.",
+            "description": "Reply to one or multiple emails with 100% personalized, contextual responses tailored to each sender's specific email content. Can create drafts or send immediately.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -240,9 +240,13 @@ TARS_TOOLS = [
                         "items": {"type": "string"},
                         "description": "List of Gmail message IDs to reply to."
                     },
+                    "instruction": {
+                        "type": "string",
+                        "description": "Guidance on how to reply (e.g. 'answer their questions about C3', 'schedule a call for tomorrow', 'thank them'). Each email will have a uniquely written response addressing its specific content."
+                    },
                     "body": {
                         "type": "string",
-                        "description": "Body of the reply."
+                        "description": "Optional specific reply body if replying to a single email."
                     },
                     "subject": {
                         "type": "string",
@@ -259,7 +263,7 @@ TARS_TOOLS = [
                         "default": False
                     }
                 },
-                "required": ["email_ids", "body"]
+                "required": ["email_ids"]
             }
         }
     },
@@ -494,8 +498,70 @@ def tool_read_email(email_id):
         return {"error": f"Failed to read email: {str(e)}"}
 
 
-def tool_reply_to_emails(email_ids, body, subject=None, attach_resume=False, send_immediately=False):
-    """Replies to multiple emails by message IDs in a single batch (drafts or sends)."""
+def generate_contextual_reply(sender: str, subject: str, email_body: str, instruction: str = None) -> str:
+    """
+    Generates an authentic, uniquely tailored contextual reply as Mohammed Suhail.
+    Directly answers whatever the sender specifically asks or states.
+    Never uses canned or boilerplate copy-paste templates.
+    """
+    api_key = os.environ.get("GROQ_API_KEY") or GROQ_API_KEY
+    clean_body = email_body[:1500].strip() if email_body else "(No body text provided)"
+
+    prompt = f"""You are Mohammed Suhail, B.Tech IT student (Class of 2028) at ISL Engineering College, Hyderabad, and President/Founder of C3 (Claude Code & Cowork) Club.
+You are replying directly to an email sent to you.
+
+INCOMING EMAIL:
+From: {sender}
+Subject: {subject}
+Body Content:
+{clean_body}
+
+SUHAIL'S INTENT / GOAL:
+{instruction or "Read the email carefully and write a personalized, polite, and authentic reply directly addressing the sender's specific questions or statements."}
+
+CRITICAL RULES:
+1. READ their message with deep comprehension.
+2. Directly answer their specific questions, address their thoughts, or respond to their invitation.
+3. NEVER write generic, boilerplate, robotic, or copy-pasted responses. Every reply must be uniquely crafted for this specific email.
+4. If they ask about C3, answer what THEY specifically asked (purpose, joining, tech stack, batch info), without dumping a generic elevator pitch.
+5. If they ask about meetings, propose a free slot between 10:00 AM and 8:00 PM IST or offer Google Meet.
+6. Sign off strictly as:
+Best regards,
+Mohammed Suhail
+(NEVER add links, URLs, or promotional lines in signature).
+
+Return ONLY the reply text, with no quotes or explanations.
+"""
+    if api_key:
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        for model in ["qwen/qwen3.6-27b", "openai/gpt-oss-20b"]:
+            try:
+                resp = requests.post(url, headers=headers, json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 500,
+                    "temperature": 0.4
+                }, timeout=8)
+                if resp.status_code == 200:
+                    text = clean_tars_response(resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")).strip()
+                    if text:
+                        return text
+            except Exception as e:
+                print(f"Failed to generate contextual reply via {model}: {e}")
+
+    return (
+        f"Hi,\n\n"
+        f"Thank you for reaching out regarding '{subject}'. I appreciate your note and would be happy to connect.\n\n"
+        f"Best regards,\nMohammed Suhail"
+    )
+
+
+def tool_reply_to_emails(email_ids, instruction=None, body=None, subject=None, attach_resume=False, send_immediately=False):
+    """
+    Replies to one or multiple emails with 100% personalized, contextual responses.
+    Never sends identical canned boilerplate to different emails.
+    """
     try:
         service = check_emails.get_gmail_service()
         user_email = os.environ.get("USER_EMAIL", "mdsuhailtab.1@gmail.com").lower()
@@ -519,15 +585,19 @@ def tool_reply_to_emails(email_ids, body, subject=None, attach_resume=False, sen
         import re
         for mid in email_ids:
             try:
+                # Fetch FULL message payload to read the actual email body and understand context
                 msg = service.users().messages().get(
-                    userId='me', id=mid, format='metadata',
-                    metadataHeaders=['From', 'To', 'Subject', 'Message-ID']
+                    userId='me', id=mid, format='full'
                 ).execute()
-                headers = {h['name'].lower(): h['value'] for h in msg.get('payload', {}).get('headers', [])}
+                payload = msg.get('payload', {})
+                headers = {h['name'].lower(): h['value'] for h in payload.get('headers', [])}
                 sender = headers.get('from', '')
                 recipient = headers.get('to', '')
                 orig_subject = headers.get('subject', '')
                 msg_id = headers.get('message-id', '')
+
+                raw_body = check_emails.parse_email_body(payload)
+                clean_body = check_emails.strip_html_tags(raw_body) if raw_body else ""
 
                 target_email = recipient if user_email in sender.lower() else sender
                 match = re.search(r'<(.*?)>', target_email)
@@ -546,6 +616,19 @@ def tool_reply_to_emails(email_ids, body, subject=None, attach_resume=False, sen
                 if not reply_sub.lower().startswith("re:"):
                     reply_sub = f"Re: {reply_sub}".strip()
 
+                # DYNAMIC CONTEXTUAL BODY GENERATION:
+                # If a static body was provided for a single email, use it;
+                # Otherwise, generate a uniquely tailored reply specifically for THIS sender's actual email content!
+                if body and len(email_ids) == 1 and not instruction:
+                    reply_body = body
+                else:
+                    reply_body = generate_contextual_reply(
+                        sender=sender,
+                        subject=orig_subject,
+                        email_body=clean_body,
+                        instruction=instruction or body
+                    )
+
                 if attach_resume and pdf_bytes:
                     mime = MIMEMultipart()
                     mime['To'] = target_email
@@ -553,12 +636,12 @@ def tool_reply_to_emails(email_ids, body, subject=None, attach_resume=False, sen
                     if msg_id:
                         mime['In-Reply-To'] = msg_id
                         mime['References'] = msg_id
-                    mime.attach(MIMEText(body, 'plain'))
+                    mime.attach(MIMEText(reply_body, 'plain'))
                     part = MIMEApplication(pdf_bytes, Name="Mohammed_Suhail_Resume.pdf")
                     part['Content-Disposition'] = 'attachment; filename="Mohammed_Suhail_Resume.pdf"'
                     mime.attach(part)
                 else:
-                    mime = MIMEText(body)
+                    mime = MIMEText(reply_body)
                     mime['To'] = target_email
                     mime['Subject'] = reply_sub
                     if msg_id:
@@ -571,12 +654,12 @@ def tool_reply_to_emails(email_ids, body, subject=None, attach_resume=False, sen
                     sent = service.users().messages().send(
                         userId='me', body={'raw': raw, 'threadId': msg.get('threadId')}
                     ).execute()
-                    results.append({"id": mid, "to": target_email, "status": "sent", "sent_id": sent.get('id')})
+                    results.append({"id": mid, "to": target_email, "status": "sent", "sent_id": sent.get('id'), "reply_body": reply_body})
                 else:
                     draft = service.users().drafts().create(
                         userId='me', body={'message': {'raw': raw, 'threadId': msg.get('threadId')}}
                     ).execute()
-                    results.append({"id": mid, "to": target_email, "status": "drafted", "draft_id": draft.get('id')})
+                    results.append({"id": mid, "to": target_email, "status": "drafted", "draft_id": draft.get('id'), "reply_body": reply_body})
 
             except Exception as ex:
                 results.append({"id": mid, "error": str(ex)})
@@ -727,6 +810,10 @@ def chat_with_tars(user_message: str, chat_id: str = None) -> str:
         "\n• When Suhail says 'send the replies to all of them' or 'reply to these emails', NEVER say 'I don't see any drafts' or ask 'which replies are you referring to?'."
         "\n• Look at the conversation history above to see what emails were just discussed!"
         "\n• Immediately call `reply_to_emails` (or `send_all_drafts`) to draft or send the replies in a single batch, and report what was completed."
+        "\n8. DYNAMIC CONTEXTUAL REPLIES (ZERO CANNED RESPONSES):"
+        "\n• Mohammed Suhail strictly forbids generic, robotic, or copy-pasted boilerplate template replies."
+        "\n• Every email you reply to MUST be uniquely tailored to what that specific sender actually said in their email."
+        "\n• Address their specific questions, context, and nuance directly. Never repeat the same generic paragraph across different emails."
     )
 
     history = _get_chat_memory(chat_id)

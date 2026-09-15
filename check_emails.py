@@ -359,30 +359,26 @@ def classify_email(sender, subject, body, calendar_context):
     2. "INFO": STRICTLY automated system emails where NO personal response is expected (e.g. GitHub notifications, newsletters, shipping updates, receipts, blogs).
     3. "SPAM": Marketing ads, cold mass sales pitches, social network alerts. (Will be moved to Trash).
 
-    CRITICAL RULE:
-    If an email is asking a direct question to Suhail, inquiring about C3 Club, or asking for his resume/CV: You MUST classify it as "URGENT" and you MUST draft a helpful, polite reply!
-
-    Special Resume Detection:
-    - Check if the email explicitly asks for Suhail's resume, CV, or updated profile document.
-    - If YES: Set "attach_resume": true in your JSON output, and write the draft reply explicitly stating that his resume has been attached for their review.
-    - If NO: Set "attach_resume": false.
-
-    If the email is URGENT:
-    - Write a concise, natural, polite, and enthusiastic draft reply in English as Mohammed Suhail.
-    - If the email is asking about C3 Club: Explain that C3 is the "Claude Code & Cowork" club at ISL Engineering College focused on rapid AI prototyping, Git/GitHub, and shipping real working projects every week.
-    - If the sender is asking to schedule a meeting, call, or interview: Suhail is available flexibly anytime between 10:00 AM and 8:00 PM IST (ensure suggested times do not conflict with busy events in his Google Calendar above). Propose a convenient time or invite them to send a Google Meet link.
-    - Sign off strictly and cleanly as:
+    CRITICAL CONTEXTUAL DIRECTIVE (ZERO CANNED / TEMPLATE REPLIES):
+    - When drafting a reply, CAREFULLY READ the incoming email body.
+    - NEVER write generic, canned, or copy-paste boilerplate replies.
+    - Your reply must directly and specifically address the EXACT questions, topic, and context raised by this specific sender.
+    - Address the sender naturally by their name (if available).
+    - If the sender asks about C3, answer what THEY specifically asked about it (e.g., purpose, joining, projects, events) in a natural, conversational tone as Mohammed Suhail (Founder & President of C3, B.Tech IT student at ISL Engineering College).
+    - If the sender asks for a meeting or call: Check Suhail's calendar above and suggest a time between 10:00 AM - 8:00 PM IST that is free, or offer to connect via Google Meet.
+    - If the sender asks for a resume/CV: Set "attach_resume": true and mention it is attached.
+    - Sign off cleanly:
       Best regards,
       Mohammed Suhail
-      (CRITICAL: NEVER include links, portfolio URLs, or promotional taglines in the signature).
-    
+      (NEVER include links, portfolio URLs, or promotional taglines in the signature).
+
     You MUST respond with a valid, clean JSON object matching this schema:
     {{
       "category": "URGENT" | "INFO" | "SPAM",
       "urgency_score": 1-5,
       "attach_resume": true | false,
       "reasoning": "A 1-sentence explanation of why you classified it this way.",
-      "draft_reply": "Your drafted reply (leave empty ONLY if category is INFO or SPAM)"
+      "draft_reply": "Your custom, context-aware drafted reply (leave empty ONLY if category is INFO or SPAM)"
     }}
     Do NOT include any markdown code blocks (like ```json) in your response, return ONLY the raw JSON string.
     """
