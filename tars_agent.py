@@ -21,6 +21,8 @@ from datetime import datetime, timezone
 # Ensure local imports work cleanly
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import check_emails
+import attachment_parser
+
 
 # Load local .env if present
 env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
@@ -252,8 +254,23 @@ TARS_TOOLS = [
             "description": "Scan inbox now for urgent emails.",
             "parameters": {"type": "object", "properties": {}}
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_email_attachments",
+            "description": "Read and parse attached files (Excel, CSV, PDF, Docx, Text) for an email.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "email_id": {"type": "string", "description": "The Gmail message ID."}
+                },
+                "required": ["email_id"]
+            }
+        }
     }
 ]
+
 
 
 # ==========================================
@@ -445,7 +462,7 @@ def tool_scan_inbox_now():
 
 
 def tool_read_email(email_id):
-    """Retrieves full email details and body text for a given message ID."""
+    """Retrieves full email details, body text, and parsed attachments for a given message ID."""
     try:
         service = check_emails.get_gmail_service()
         msg = service.users().messages().get(userId='me', id=email_id, format='full').execute()
@@ -453,6 +470,19 @@ def tool_read_email(email_id):
         headers = {h['name'].lower(): h['value'] for h in payload.get('headers', [])}
         body = check_emails.parse_email_body(payload)
         clean_body = check_emails.strip_html_tags(body) if body else "(Empty body)"
+
+        # Extract attachments
+        attachments = []
+        try:
+            attachments = attachment_parser.extract_attachments_from_message(service, email_id, payload)
+        except Exception as ex:
+            print(f"Attachment parsing error for {email_id}: {ex}")
+
+        att_summary = attachment_parser.format_attachments_for_llm(attachments) if attachments else ""
+        full_text = clean_body
+        if att_summary:
+            full_text += "\n" + att_summary
+
         user_email = os.environ.get("USER_EMAIL", "mdsuhailtab.1@gmail.com").lower()
         sender = headers.get('from', 'Unknown')
         recipient = headers.get('to', '')
@@ -466,10 +496,34 @@ def tool_read_email(email_id):
             "reply_to": reply_to_target,
             "subject": headers.get('subject', '(No Subject)'),
             "date": headers.get('date', ''),
-            "body": clean_body[:1200]
+            "attachments": [a['filename'] for a in attachments] if attachments else [],
+            "body": full_text[:2500]
         }
     except Exception as e:
         return {"error": f"Failed to read email: {str(e)}"}
+
+
+def tool_read_email_attachments(email_id):
+    """Fetches and parses attached files (Excel, CSV, PDF, Docx, Text) for an email."""
+    try:
+        service = check_emails.get_gmail_service()
+        msg = service.users().messages().get(userId='me', id=email_id, format='full').execute()
+        payload = msg.get('payload', {})
+        attachments = attachment_parser.extract_attachments_from_message(service, email_id, payload)
+        if not attachments:
+            return {"status": "no_attachments", "message": f"No attachments found in email {email_id}."}
+
+        formatted = attachment_parser.format_attachments_for_llm(attachments)
+        return {
+            "status": "success",
+            "email_id": email_id,
+            "attachment_count": len(attachments),
+            "files": [a['filename'] for a in attachments],
+            "parsed_attachments": formatted
+        }
+    except Exception as e:
+        return {"error": f"Failed to read attachments: {str(e)}"}
+
 
 
 def generate_contextual_reply(sender: str, subject: str, email_body: str, instruction: str = None) -> str:
@@ -577,6 +631,18 @@ def tool_reply_to_emails(email_ids, instruction=None, body=None, subject=None, a
                 raw_body = check_emails.parse_email_body(payload)
                 clean_body = check_emails.strip_html_tags(raw_body) if raw_body else ""
 
+                # Extract attachments for context (Excel, CSV, PDF, Docx)
+                attachments = []
+                try:
+                    attachments = attachment_parser.extract_attachments_from_message(service, mid, payload)
+                except Exception as ex:
+                    print(f"Attachment parsing warning for {mid}: {ex}")
+
+                att_text = attachment_parser.format_attachments_for_llm(attachments) if attachments else ""
+                full_body_for_reply = clean_body
+                if att_text:
+                    full_body_for_reply += "\n" + att_text
+
                 target_email = recipient if user_email in sender.lower() else sender
                 match = re.search(r'<(.*?)>', target_email)
                 target_email = match.group(1) if match else target_email.strip()
@@ -596,16 +662,17 @@ def tool_reply_to_emails(email_ids, instruction=None, body=None, subject=None, a
 
                 # DYNAMIC CONTEXTUAL BODY GENERATION:
                 # If a static body was provided for a single email, use it;
-                # Otherwise, generate a uniquely tailored reply specifically for THIS sender's actual email content!
+                # Otherwise, generate a uniquely tailored reply specifically for THIS sender's actual email content and attachments!
                 if body and len(email_ids) == 1 and not instruction:
                     reply_body = body
                 else:
                     reply_body = generate_contextual_reply(
                         sender=sender,
                         subject=orig_subject,
-                        email_body=clean_body,
+                        email_body=full_body_for_reply,
                         instruction=instruction or body
                     )
+
 
                 if attach_resume and pdf_bytes:
                     mime = MIMEMultipart()
@@ -730,8 +797,10 @@ TOOL_MAP = {
     "trash_emails": tool_trash_emails,
     "mark_as_read": tool_mark_as_read,
     "scan_inbox_now": tool_scan_inbox_now,
-    "read_email": tool_read_email
+    "read_email": tool_read_email,
+    "read_email_attachments": tool_read_email_attachments
 }
+
 
 
 # ==========================================
@@ -844,7 +913,11 @@ def chat_with_tars(user_message: str, chat_id: str = None) -> str:
         "\n• Mohammed Suhail strictly forbids generic, robotic, or copy-pasted boilerplate template replies."
         "\n• Every email you reply to MUST be uniquely tailored to what that specific sender actually said in their email."
         "\n• Address their specific questions, context, and nuance directly. Never repeat the same generic paragraph across different emails."
+        "\n10. ATTACHMENT & SPREADSHEET COMPREHENSION:"
+        "\n• You have full access to `read_email_attachments` and `read_email` to inspect attached files (Excel, CSV, PDF, Docx, Text)."
+        "\n• When Suhail asks about the contents of an email attachment (e.g. 'read the spreadsheet', 'what does the budget say?', 'check the attached PDF'), call `read_email_attachments` or `read_email` and cite the exact numbers, rows, or details from the parsed file data."
     )
+
 
     history = _get_chat_memory(chat_id)
 

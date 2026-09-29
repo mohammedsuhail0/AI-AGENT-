@@ -10,6 +10,8 @@ from datetime import datetime, timedelta, timezone
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
+from attachment_parser import extract_attachments_from_message, format_attachments_for_llm
+
 
 # Load local .env file if it exists (for local testing)
 env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
@@ -445,7 +447,7 @@ def classify_email(sender, subject, body, calendar_context):
         }
 
 
-def send_telegram_alert(sender, subject, summary, draft, thread_id, attach_resume=False):
+def send_telegram_alert(sender, subject, summary, draft, thread_id, attach_resume=False, attached_files=None):
     """Sends an interactive Telegram alert with Approve & Ignore inline buttons using safe HTML."""
     safe_sender = html.escape(sender or "Unknown")
     safe_subject = html.escape(subject or "(No Subject)")
@@ -453,16 +455,22 @@ def send_telegram_alert(sender, subject, summary, draft, thread_id, attach_resum
     safe_draft = html.escape(draft or "")
 
     attachment_badge = "📎 <b>Attachment:</b> <code>Mohammed_Suhail_Resume.pdf</code> (Auto-attached on Send)\n\n" if attach_resume else ""
+    incoming_files_badge = ""
+    if attached_files:
+        files_str = ", ".join(attached_files)
+        incoming_files_badge = f"📊 <b>Attached Files Analyzed:</b> <code>{html.escape(files_str)}</code>\n\n"
 
     message = (
         f"🔴 <b>URGENT EMAIL DETECTED</b>\n\n"
         f"📧 <b>From:</b> {safe_sender}\n"
         f"📌 <b>Subject:</b> {safe_subject}\n\n"
         f"📖 <b>Summary:</b> {safe_summary}\n\n"
+        f"{incoming_files_badge}"
         f"{attachment_badge}"
         f"📝 <b>Drafted Reply:</b>\n"
         f"<pre>{safe_draft}</pre>"
     )
+
 
     # Enforce Telegram 4,000 character safety margin
     if len(message) > 4000:
@@ -710,17 +718,33 @@ def main(max_emails=10, sleep_between=True):
 
         processed_count += 1
         try:
+            payload = msg_detail.get('payload', {})
             headers = clean_email_headers(msg_detail)
-            body = parse_email_body(msg_detail.get('payload', {}))
-            
+            body = parse_email_body(payload)
+
+            # Extract and parse any attachments (Excel, CSV, PDF, Docx, etc.)
+            attachments = []
+            try:
+                attachments = extract_attachments_from_message(gmail, msg_id, payload)
+            except Exception as att_err:
+                print(f"Attachment parsing warning for {msg_id}: {att_err}")
+
+            attachments_text = format_attachments_for_llm(attachments) if attachments else ""
+            full_content = body
+            if attachments_text:
+                full_content += "\n" + attachments_text
+
             sender = headers['From']
             subject = headers['Subject']
-            body_truncated = body[:3000] if len(body) > 3000 else body
+            body_truncated = full_content[:3500] if len(full_content) > 3500 else full_content
 
             print(f"Scanning email: '{subject}' from {sender}")
-            
+            if attachments:
+                att_names = [a['filename'] for a in attachments]
+                print(f"Detected {len(attachments)} attachment(s): {att_names}")
+
             analysis = classify_email(sender, subject, body_truncated, calendar_context)
-            
+
             category = analysis.get("category", "INFO")
             reason = analysis.get("reasoning", "")
             attach_resume = analysis.get("attach_resume", False)
@@ -735,11 +759,12 @@ def main(max_emails=10, sleep_between=True):
                 print(f"Draft is empty for URGENT email. Generating contextual reply for '{subject}'...")
                 draft = generate_contextual_reply(sender, subject, body_truncated, calendar_context)
 
-
             print(f"AI Category: {category} | Reason: {reason}")
-            
+
             if category == "URGENT":
-                send_telegram_alert(sender, subject, reason, draft, thread_id, attach_resume=attach_resume)
+                attached_filenames = [a['filename'] for a in attachments] if attachments else None
+                send_telegram_alert(sender, subject, reason, draft, thread_id, attach_resume=attach_resume, attached_files=attached_filenames)
+
             elif category == "INFO":
                 gmail.users().messages().batchModify(
                     userId='me',
