@@ -55,7 +55,8 @@ STUDENT_PROFILE = os.environ.get(
     "User: Mohammed Suhail (Location: Hyderabad, India, IST / UTC+5:30).\n"
     "Role: B.Tech Information Technology student (Class of 2028) at ISL Engineering College, Hyderabad. "
     "President & Founder of C3 (Claude Code & Cowork) Club.\n"
-    "Persona: A proactive builder and pragmatic vibe coder who loves shipping rapid AI prototypes, full-stack web apps, and autonomous agents.\n"
+    "Certifications & Technical Training: Completed Data Science course from Full Stack Academy (skilled in Data Analysis, Pandas, NumPy, Machine Learning fundamentals, and Python for data applications).\n"
+    "Persona: A proactive builder, data science practitioner, and pragmatic vibe coder who loves shipping rapid AI prototypes, full-stack web apps, and autonomous agents.\n"
     "Availability: Highly flexible and available anytime for calls, Google Meets, or interviews (standard hours 10:00 AM - 8:00 PM IST), respecting any busy slots on the Google Calendar.\n"
     "Signature Format:\n"
     "Best regards,\n"
@@ -68,6 +69,7 @@ STUDENT_PROFILE = os.environ.get(
     "- TIER 4 ('SPAM'): Marketing spam, sales promotions, unwanted cold blasts (auto-trashed).\n"
     "Communication Tone: Polite, enthusiastic, concise, humble, and action-oriented. Never corporate fluff or artificial arrogance."
 )
+
 
 LABEL_SCAN_NAME = "AI-Scanned"
 LABEL_INFO_NAME = "AI-Info"
@@ -230,14 +232,81 @@ def parse_email_body(payload):
 
 
 def clean_email_headers(message_detail):
-    """Extracts Subject, From, Date, and Message-ID from headers."""
+    """Extracts Subject, From, Date, Message-ID, and RFC automated headers from message detail."""
     headers = message_detail.get('payload', {}).get('headers', [])
-    email_data = {'Subject': '', 'From': '', 'Date': '', 'Message-ID': ''}
+    email_data = {
+        'Subject': '', 'From': '', 'Date': '', 'Message-ID': '',
+        'List-Unsubscribe': '', 'List-Id': '', 'Auto-Submitted': '',
+        'Precedence': '', 'Reply-To': ''
+    }
     for header in headers:
-        name = header.get('name')
-        if name in email_data:
-            email_data[name] = header.get('value')
+        name = header.get('name', '')
+        for key in email_data.keys():
+            if name.lower() == key.lower():
+                email_data[key] = header.get('value', '')
     return email_data
+
+
+def is_automated_email(headers: dict, sender: str, body: str) -> bool:
+    """
+    Detects if an incoming email is an automated system notification, newsletter,
+    marketing blast, or no-reply message.
+    Automated emails must NEVER be classified as URGENT and must NEVER get draft replies.
+    """
+    sender_lower = (sender or "").lower()
+    body_lower = (body or "")[:3000].lower()
+
+    # 1. Header checks (RFC standards for automated / bulk emails)
+    if headers:
+        if headers.get('List-Unsubscribe') or headers.get('list-unsubscribe'):
+            return True
+        if headers.get('List-Id') or headers.get('list-id'):
+            return True
+        precedence = (headers.get('Precedence') or headers.get('precedence') or '').lower()
+        if precedence in ['bulk', 'list', 'junk']:
+            return True
+        auto_sub = (headers.get('Auto-Submitted') or headers.get('auto-submitted') or '').lower()
+        if auto_sub and auto_sub != 'no':
+            return True
+
+    # 2. Sender address / display name checks
+    automated_sender_tokens = [
+        "no-reply", "noreply", "do-not-reply", "donotreply",
+        "notifications@", "notification@", "alerts@", "alert@",
+        "updates@", "mailer@", "newsletter@", "news@", "digest@",
+        "marketing@", "billing@", "invitations@", "automated@",
+        "system@", "bounces@", "support@mail.", "info@mail.",
+        "service@", "orders@", "receipts@", "promotions@",
+        "campaigns@", "bounce@", "mailer-daemon"
+    ]
+    if any(token in sender_lower for token in automated_sender_tokens):
+        return True
+
+    # 3. Known automated platform domains (notifications/blasts)
+    automated_domains = [
+        "github.com", "vercel.com", "linkedin.com", "indeed.com",
+        "unstop.com", "coursera.org", "udemy.com", "glassdoor.com",
+        "naukri.com", "medium.com", "substack.com", "accounts.google.com",
+        "facebookmail.com", "twitter.com", "x.com", "figma.com",
+        "slack.com", "notion.so", "mailchimp.com", "sendgrid.net",
+        "kaggle.com", "hackerrank.com", "leetcode.com", "codechef.com"
+    ]
+    if any(f"@{dom}" in sender_lower or f".{dom}" in sender_lower for dom in automated_domains):
+        return True
+
+    # 4. Body indicators of automated notifications or marketing
+    unsubscribe_indicators = [
+        "unsubscribe", "manage your notification", "manage your email preferences",
+        "manage your preferences", "to stop receiving these emails",
+        "this is an automated message", "please do not reply to this email",
+        "do not reply directly to this email", "you received this email because you are registered",
+        "view this email in your browser"
+    ]
+    if any(phrase in body_lower for phrase in unsubscribe_indicators):
+        return True
+
+    return False
+
 
 
 def get_upcoming_events(service):
@@ -336,7 +405,7 @@ def generate_contextual_reply(sender, subject, body, calendar_context=""):
     """
     system_prompt = (
         "You are Mohammed Suhail, B.Tech IT student (Class of 2028) at ISL Engineering College, Hyderabad, "
-        "and President/Founder of C3 (Claude Code & Cowork) Club.\n"
+        "graduate of Full Stack Academy's Data Science course, and President/Founder of C3 (Claude Code & Cowork) Club.\n"
         "You are writing a personalized, direct email reply to an incoming message.\n"
         "CRITICAL RULES:\n"
         "1. Read the sender's email carefully and directly answer their specific questions, comments, or requests.\n"
@@ -398,13 +467,18 @@ def classify_email(sender, subject, body, calendar_context):
     {calendar_context}
     
     Decide if this email is:
-    1. "URGENT": Any email sent by a human or organization that asks a question, requests a resume/CV, requests information, schedules a meeting, or relates to opportunities.
-       - TIER 1 TOP PRIORITY: Hackathon shortlists/updates, internship/job offers & recruiter outreach, freelance client inquiries.
-       - TIER 2 HIGH PRIORITY: Inquiries about C3 Club, direct questions from students/colleagues/faculty, official ISL Engineering College academic notices (exams, hall tickets, grades).
-       - Meeting, interview, or call requests.
-       - ANY email where someone is directly addressing Suhail or expecting his personal reply.
-    2. "INFO": STRICTLY automated system emails where NO personal response is expected (e.g. GitHub notifications, newsletters, shipping updates, receipts, blogs).
+    1. "URGENT": STRICTLY genuine personal emails sent by an INDIVIDUAL HUMAN who directly addresses Suhail and expects his personal reply.
+       - TIER 1 TOP PRIORITY: Hackathon shortlists/invitations, human recruiters or founders with internship/job offers, freelance client leads.
+       - TIER 2 HIGH PRIORITY: Inquiries from students/colleagues/faculty about C3 Club, official ISL Engineering College academic notices, personal meeting/interview requests.
+       - Direct human inquiries asking Suhail for information, collaboration, or his resume.
+    2. "INFO": ALL automated system emails, newsletters, platform notifications, job board blasts (e.g. Indeed, Unstop, LinkedIn automated digests), GitHub/Vercel build alerts, receipts, shipping updates, webinars, and announcements where NO personal response is expected.
     3. "SPAM": Marketing ads, cold mass sales pitches, social network alerts. (Will be moved to Trash).
+
+    CRITICAL RULE ON AUTOMATED EMAILS & DRAFTS:
+    - NEVER classify an automated notification, newsletter, or platform digest as "URGENT".
+    - If the email is from a company notification, job portal, automated platform, or contains an unsubscribe link, it MUST be "INFO" or "SPAM".
+    - "draft_reply" MUST be completely empty ("") for ALL "INFO" and "SPAM" emails.
+
 
     CRITICAL CONTEXTUAL DIRECTIVE (ZERO CANNED / TEMPLATE REPLIES):
     - When drafting a reply, CAREFULLY READ the incoming email body.
@@ -743,27 +817,41 @@ def main(max_emails=10, sleep_between=True):
                 att_names = [a['filename'] for a in attachments]
                 print(f"Detected {len(attachments)} attachment(s): {att_names}")
 
-            analysis = classify_email(sender, subject, body_truncated, calendar_context)
+            # AUTOMATED EMAIL FILTER (Zero Automated Replies):
+            is_auto = is_automated_email(headers, sender, body)
 
-            category = analysis.get("category", "INFO")
-            reason = analysis.get("reasoning", "")
-            attach_resume = analysis.get("attach_resume", False)
-            draft = analysis.get("draft_reply", "")
+            if is_auto:
+                print(f"Detected automated email from {sender}. Tagging as INFO/SPAM (no draft).")
+                if any(p in subject.lower() or p in body_truncated.lower() for p in ['discount', 'deal', 'sale', 'off your', 'promo', 'ad:']):
+                    category = "SPAM"
+                    reason = "Automated promotional/marketing email."
+                else:
+                    category = "INFO"
+                    reason = "Automated system notification or platform update (no personal response needed)."
+                draft = ""
+                attach_resume = False
+            else:
+                analysis = classify_email(sender, subject, body_truncated, calendar_context)
+                category = analysis.get("category", "INFO")
+                reason = analysis.get("reasoning", "")
+                attach_resume = analysis.get("attach_resume", False)
+                draft = analysis.get("draft_reply", "")
 
-            # Safeguard: If resume requested or direct human inquiry about C3/projects, force URGENT
-            if attach_resume or ("c3" in body_truncated.lower() and "?" in body_truncated):
-                category = "URGENT"
+                # Safeguard: ONLY for human emails asking about C3 or requesting resume
+                if attach_resume or ("c3" in body_truncated.lower() and "?" in body_truncated):
+                    category = "URGENT"
 
-            # If URGENT and no draft was returned by classifier, generate a 100% contextual draft from the email body
-            if category == "URGENT" and not draft:
-                print(f"Draft is empty for URGENT email. Generating contextual reply for '{subject}'...")
-                draft = generate_contextual_reply(sender, subject, body_truncated, calendar_context)
+                # If URGENT and no draft was returned by classifier, generate a 100% contextual draft from the email body
+                if category == "URGENT" and not draft:
+                    print(f"Draft is empty for URGENT email. Generating contextual reply for '{subject}'...")
+                    draft = generate_contextual_reply(sender, subject, body_truncated, calendar_context)
 
             print(f"AI Category: {category} | Reason: {reason}")
 
             if category == "URGENT":
                 attached_filenames = [a['filename'] for a in attachments] if attachments else None
                 send_telegram_alert(sender, subject, reason, draft, thread_id, attach_resume=attach_resume, attached_files=attached_filenames)
+
 
             elif category == "INFO":
                 gmail.users().messages().batchModify(

@@ -46,9 +46,11 @@ Your current operational parameters:
 You directly assist Mohammed Suhail (you may address him as "Suhail" or occasionally "Commander").
 Key background context about Suhail:
 - B.Tech IT student (Class of 2028) at ISL Engineering College, Hyderabad.
+- Completed Data Science course from Full Stack Academy (skilled in Data Analysis, Pandas, NumPy, Machine Learning fundamentals).
 - Founder & President of C3 Club (Claude Code & Cowork) - focused on AI engineering, Claude Code, and shipping real working projects weekly.
 - "Vibe Coder" builder philosophy: pragmatic, fast prototyping, zero unnecessary fluff.
 - Available for meetings & calls: 10:00 AM – 8:00 PM IST.
+
 
 Personality & Tone:
 - Military-grade efficiency, deadpan wit, dry humor, exceptionally capable.
@@ -535,8 +537,9 @@ def generate_contextual_reply(sender: str, subject: str, email_body: str, instru
     api_key = os.environ.get("GROQ_API_KEY") or GROQ_API_KEY
     clean_body = email_body[:1500].strip() if email_body else "(No body text provided)"
 
-    prompt = f"""You are Mohammed Suhail, B.Tech IT student (Class of 2028) at ISL Engineering College, Hyderabad, and President/Founder of C3 (Claude Code & Cowork) Club.
+    prompt = f"""You are Mohammed Suhail, B.Tech IT student (Class of 2028) at ISL Engineering College, Hyderabad, graduate of Full Stack Academy's Data Science course, and President/Founder of C3 (Claude Code & Cowork) Club.
 You are replying directly to an email sent to you.
+
 
 INCOMING EMAIL:
 From: {sender}
@@ -656,7 +659,13 @@ def tool_reply_to_emails(email_ids, instruction=None, body=None, subject=None, a
                         results.append({"id": mid, "error": "Recipient is Suhail himself, skipped."})
                         continue
 
+                # Guard against replying to automated / no-reply emails
+                if check_emails.is_automated_email(headers, sender, clean_body):
+                    results.append({"id": mid, "status": "skipped", "reason": f"Skipped {target_email} - automated notification or no-reply sender."})
+                    continue
+
                 reply_sub = subject or orig_subject
+
                 if not reply_sub.lower().startswith("re:"):
                     reply_sub = f"Re: {reply_sub}".strip()
 
@@ -916,7 +925,11 @@ def chat_with_tars(user_message: str, chat_id: str = None) -> str:
         "\n10. ATTACHMENT & SPREADSHEET COMPREHENSION:"
         "\n• You have full access to `read_email_attachments` and `read_email` to inspect attached files (Excel, CSV, PDF, Docx, Text)."
         "\n• When Suhail asks about the contents of an email attachment (e.g. 'read the spreadsheet', 'what does the budget say?', 'check the attached PDF'), call `read_email_attachments` or `read_email` and cite the exact numbers, rows, or details from the parsed file data."
+        "\n11. STRICT PROHIBITION ON REPLYING TO AUTOMATED EMAILS:"
+        "\n• NEVER draft, send, or propose replies to automated platform emails, notifications, newsletters, receipts, or no-reply addresses (e.g. Indeed, Unstop, LinkedIn, GitHub, Vercel, Coursera, system alerts)."
+        "\n• For automated emails, ONLY offer to archive them (`archive_emails`) or trash them (`trash_emails`)."
     )
+
 
 
     history = _get_chat_memory(chat_id)
