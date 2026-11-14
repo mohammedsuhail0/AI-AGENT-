@@ -1279,8 +1279,111 @@ Respond ONLY with valid JSON:
     }
 
 
+VOICE_AGENT_SYSTEM_PROMPT = """You are TARS, executive voice AI assistant speaking live on a telephone call with Mohammed Suhail. Always address him naturally as 'boss'.
+You have full real-time access to his Gmail via tools (search_emails, get_recent_unread_emails, read_email, create_draft_email, send_email, clean_promotions, archive_emails, trash_emails, etc.).
+
+CRITICAL SPOKEN VOICE RULES:
+1. Spoken Audio Only: Output PURE SPOKEN ENGLISH. NEVER output markdown (no asterisks **, no bullet points, no headers, no emojis, no URLs).
+2. Concise & Direct: Keep responses between 2 and 4 sentences so Suhail can digest it easily over the phone.
+3. Live Gmail RAG: When Suhail asks if he received any emails (e.g. from Samer, unread emails, interview updates), call search_emails or get_recent_unread_emails, extract key info (who, when, subject, summary), and report it clearly.
+4. Next Steps: Always conclude by asking the natural next action (e.g. 'Would you like me to read the full message, or draft a reply with your resume attached?').
+5. Sending Emails: If Suhail asks to reply or send an email, call create_draft_email or prepare the message, describe it briefly, and ask: 'Shall I send that now, boss?'.
+6. Confirming Send: If Suhail confirms ('yes', 'send it', 'do it'), call send_email or send_draft immediately, and confirm: 'Sent boss! Anything else I can help with?'.
+7. Farewell: If Suhail says 'that is all', 'thanks', 'goodbye', or 'bye', reply with a warm closing like 'Always at your service boss, have a great day!' and append '[HANGUP]'.
+"""
+
+
+def execute_voice_rag_turn(user_query: str, history: list = None) -> tuple[str, bool]:
+    """
+    Executes an autonomous multi-turn voice RAG turn with live tool calling over Gmail.
+    Returns (spoken_text, should_hangup).
+    """
+    if history is None:
+        history = []
+    
+    clean_q = user_query.lower().strip()
+    if any(farewell in clean_q for farewell in ["goodbye", "bye", "that's all", "thats all", "nothing else", "no thanks", "all good", "i'm good"]):
+        return "Always at your service boss. Have a wonderful day!", True
+
+    messages = [{"role": "system", "content": VOICE_AGENT_SYSTEM_PROMPT}] + history + [{"role": "user", "content": user_query}]
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+    voice_models = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
+
+    import tars_agent
+
+    for model in voice_models:
+        try:
+            curr_messages = list(messages)
+            for step in range(3):
+                payload = {
+                    "model": model,
+                    "messages": curr_messages,
+                    "tools": tars_agent.TARS_TOOLS,
+                    "tool_choice": "auto",
+                    "temperature": 0.3
+                }
+                resp = requests.post(url, headers=headers, json=payload, timeout=12)
+                if resp.status_code != 200:
+                    break
+                
+                resp_json = resp.json()
+                choice = resp_json.get("choices", [{}])[0].get("message", {})
+                tool_calls = choice.get("tool_calls", [])
+                
+                if not tool_calls:
+                    content = choice.get("content", "").strip()
+                    # Strip any markdown or special formatting
+                    clean_spoken = re.sub(r'[*_#`~]', '', content)
+                    clean_spoken = re.sub(r'\[.*?\]\(.*?\)', '', clean_spoken)
+                    clean_spoken = " ".join(clean_spoken.split())
+                    should_hangup = "[HANGUP]" in content or "[hangup]" in content.lower()
+                    clean_spoken = clean_spoken.replace("[HANGUP]", "").replace("[hangup]", "").strip()
+                    return clean_spoken, should_hangup
+
+                curr_messages.append(choice)
+                for tc in tool_calls:
+                    fn_name = tc.get("function", {}).get("name")
+                    fn_args_raw = tc.get("function", {}).get("arguments", "{}")
+                    try:
+                        fn_args = json.loads(fn_args_raw)
+                    except Exception:
+                        fn_args = {}
+                    
+                    print(f"Executing voice tool: {fn_name}({fn_args})")
+                    handler = tars_agent.TOOL_MAP.get(fn_name)
+                    if handler:
+                        tool_res = handler(**fn_args)
+                    else:
+                        tool_res = {"error": f"Unknown tool {fn_name}"}
+                    
+                    curr_messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.get("id", "call_0"),
+                        "name": fn_name,
+                        "content": json.dumps(tool_res)
+                    })
+        except Exception as e:
+            print(f"Model {model} voice exception: {e}")
+            continue
+
+    return "I ran into a momentary hitch accessing your inbox boss. Could you repeat that?", False
+
+
 def handle_inbound_voice_session(rtp_sock, destinations, call_id, from_tag, to_tag, contact_uri, caller_ip, caller_port, sip_sock, local_ip, local_port, routes=None, tx_srtp=None, rx_srtp=None):
-    """Executes full interactive AI voice agent when Suhail calls in."""
+    """
+    Full Autonomous Conversational Voice RAG Engine (Telegram Agent on Phone Call):
+    - Greets boss: 'Hello boss, TARS online. How can I help you today?'
+    - Multi-turn conversational loop:
+        1. Records user's speech via mic with 1.8s silence detection (up to 15s).
+        2. Transcribes with Groq Whisper.
+        3. If quiet on Turn 1, prompts once. If farewell ('that's all', 'bye'), concludes warmly and hangs up.
+        4. Plays fast 0ms acknowledgment filler ('Checking that for you now, boss.') so there is no dead silence.
+        5. Executes live Gmail tools via execute_voice_rag_turn (search_emails, read_email, get_recent_unread_emails, clean_promotions, create_draft_email, send_email, etc.).
+        6. Converts answer to natural spoken audio (en-GB-ThomasNeural +0% rate).
+        7. Plays spoken response over RTP with continuous wall-clock timestamps (solid green bars!).
+        8. If the turn had [HANGUP], ends the call; otherwise listens for boss's next question or command!
+    """
     def is_current_call():
         with _active_inbound_lock:
             return _active_inbound_call_id == call_id
@@ -1307,109 +1410,82 @@ def handle_inbound_voice_session(rtp_sock, destinations, call_id, from_tag, to_t
 
     player = RTPPlayer(rtp_sock, destinations, srtp_session=tx_srtp)
     beep_ulaw = generate_beep_ulaw(freq=800, duration_sec=0.18)
-    inbound_greeting = get_or_create_cached_audio("inbound_greeting", "Hello boss, I'm listening. Who would you like me to email, and what should I say?")
-    ack_drafting_ulaw = get_or_create_cached_audio("ack_drafting", "On it boss, drafting that now.")
-    ack_sending_ulaw = get_or_create_cached_audio("ack_sending", "Sending it right now, boss.")
-    farewell_ulaw = get_or_create_cached_audio("farewell", "All done boss! Email sent with your resume attached. Have a great day!")
-    cancel_ulaw = get_or_create_cached_audio("cancel", "No problem boss, canceled.")
+    inbound_greeting = get_or_create_cached_audio("inbound_greeting", "Hello boss, TARS online. How can I help you today?")
+    ack_checking_ulaw = get_or_create_cached_audio("ack_checking", "Checking that for you now, boss.")
+    farewell_ulaw = get_or_create_cached_audio("farewell", "Always at your service boss. Have a wonderful day!")
 
-    # 1. Greet
-    print("🗣️ Inbound TARS: Speaking greeting to boss...")
+    # 1. Greet Boss
+    print("🗣️ Inbound TARS: Greeting boss with live conversational RAG agent...")
     player.play(inbound_greeting)
     player.play(beep_ulaw)
 
-    if not is_current_call():
-        rtp_sock.close()
-        return
+    conversation_history = []
+    turn = 0
+    max_turns = 8
+    all_transcripts = []
 
-    # 2. Record command (comfortable 1.8s silence window, up to 15s)
-    user_pcm, dtmf_digit = record_user_speech(rtp_sock, max_seconds=15.0, silence_timeout=1.8, player=player, srtp_session=rx_srtp)
-    player.play(ack_drafting_ulaw)
+    while is_current_call() and turn < max_turns:
+        turn += 1
+        print(f"\n--- INBOUND VOICE TURN {turn} ---")
 
-    if not is_current_call():
-        rtp_sock.close()
-        return
+        # Record boss's speech (1.8s silence timeout, up to 15s)
+        user_pcm, dtmf_digit = record_user_speech(rtp_sock, max_seconds=15.0, silence_timeout=1.8, player=player, srtp_session=rx_srtp)
+        if not is_current_call():
+            break
 
-    transcript = transcribe_pcm_audio(user_pcm) if len(user_pcm) >= 1500 else ""
-    print(f"\n🗣️ BOSS INBOUND COMMAND: '{transcript}'")
-
-    if not transcript:
-        # One retry if quiet
-        retry_prompt = asyncio.run(generate_speech_ulaw("I didn't catch that boss. Who would you like me to email, and what should I say?", rate=VOICE_RATE, pitch=VOICE_PITCH))
-        player.play(retry_prompt)
-        player.play(beep_ulaw)
-        user_pcm, dtmf_digit = record_user_speech(rtp_sock, max_seconds=10.0, silence_timeout=1.8, player=player, srtp_session=rx_srtp)
         transcript = transcribe_pcm_audio(user_pcm) if len(user_pcm) >= 1500 else ""
-        print(f"🗣️ BOSS INBOUND RETRY COMMAND: '{transcript}'")
+        print(f"🗣️ BOSS: '{transcript}'")
 
-    if not transcript or not is_current_call():
-        if is_current_call():
-            player.play(cancel_ulaw)
-            time.sleep(0.5)
-            _send_inbound_bye(sip_sock, contact_uri, local_ip, local_port, to_tag, from_tag, call_id, caller_ip, caller_port, routes)
-        rtp_sock.close()
-        return
+        if not transcript:
+            if turn == 1:
+                retry_prompt = asyncio.run(generate_speech_ulaw("I'm listening boss, what would you like me to check?", rate=VOICE_RATE, pitch=VOICE_PITCH))
+                player.play(retry_prompt)
+                player.play(beep_ulaw)
+                continue
+            else:
+                # Quiet on follow-up turn -> call finished
+                break
 
-    # 3. Parse & Draft
-    parsed = parse_inbound_email_dictation(transcript)
-    recip_query = parsed.get("recipient_name", "Samer")
-    target_email = resolve_contact_email(recip_query)
-    subject = parsed.get("subject", "Regarding our conversation")
-    drafted_body = parsed.get("drafted_body", "")
-    attach_resume = parsed.get("attach_resume", True)
-    spoken_confirmation = parsed.get("spoken_confirmation", f"Got it boss. I'll email {recip_query} saying what you wanted, and attach your resume. Should I send it now, boss?")
+        all_transcripts.append(transcript)
 
-    # 4. Confirm with user (supports corrections)
-    print(f"🗣️ TARS Inbound Confirming: '{spoken_confirmation}'")
-    confirm_q_ulaw = asyncio.run(generate_speech_ulaw(spoken_confirmation, rate=VOICE_RATE, pitch=VOICE_PITCH))
-    player.play(confirm_q_ulaw)
-    player.play(beep_ulaw)
+        # Check if user says goodbye / farewell
+        clean_q = transcript.lower().strip()
+        if any(w in clean_q for w in ["goodbye", "bye", "that's all", "thats all", "nothing else", "no thanks", "all good", "i'm good"]):
+            player.play(farewell_ulaw)
+            break
 
-    confirm_pcm, confirm_dtmf = record_user_speech(rtp_sock, max_seconds=7.0, silence_timeout=1.5, player=player, srtp_session=rx_srtp)
-    confirm_transcript = transcribe_pcm_audio(confirm_pcm) if len(confirm_pcm) >= 1500 else ""
-    decision, update_text = classify_confirmation_or_correction(confirm_transcript, confirm_dtmf)
-    print(f"🗣️ BOSS CONFIRMATION: '{confirm_transcript}' | Decision: {decision}")
+        # Instant acoustic filler while RAG runs (0ms perceived latency)
+        player.play(ack_checking_ulaw)
 
-    if decision == "UPDATE" and is_current_call():
-        print(f"🔄 Boss updated inbound instruction: '{update_text}' - Updating draft...")
-        revised = parse_inbound_email_dictation(f"Original request: {transcript}. Boss modification: {update_text}")
-        drafted_body = revised.get("drafted_body", drafted_body)
-        attach_resume = revised.get("attach_resume", attach_resume)
-        spoken_confirmation = revised.get("spoken_confirmation", "Got it boss. I updated the draft. Shall I send it now?")
-        player.play(asyncio.run(generate_speech_ulaw(spoken_confirmation, rate=VOICE_RATE, pitch=VOICE_PITCH)))
+        # Execute live RAG over Gmail
+        spoken_response, should_hangup = execute_voice_rag_turn(transcript, conversation_history)
+        print(f"🤖 TARS: '{spoken_response}' (hangup={should_hangup})")
+
+        # Save to conversation memory
+        conversation_history.append({"role": "user", "content": transcript})
+        conversation_history.append({"role": "assistant", "content": spoken_response})
+
+        # Synthesize & play response
+        speech_ulaw = asyncio.run(generate_speech_ulaw(spoken_response, rate=VOICE_RATE, pitch=VOICE_PITCH))
+        if not is_current_call():
+            break
+
+        player.play(speech_ulaw)
         player.play(beep_ulaw)
-        rev_pcm, rev_dtmf = record_user_speech(rtp_sock, max_seconds=6.0, silence_timeout=1.2, player=player, srtp_session=rx_srtp)
-        rev_transcript = transcribe_pcm_audio(rev_pcm) if len(rev_pcm) >= 1500 else ""
-        rev_dec, _ = classify_confirmation_or_correction(rev_transcript, rev_dtmf)
-        user_confirmed = (rev_dec == "CONFIRM" or "yes" in rev_transcript.lower() or "send" in rev_transcript.lower())
-    else:
-        user_confirmed = (decision == "CONFIRM")
 
-    if not is_current_call():
-        rtp_sock.close()
-        return
+        if should_hangup:
+            break
 
-    if user_confirmed:
-        player.play(ack_sending_ulaw)
-        import tars_agent
-        print(f"🚀 Sending outbound email to {target_email} (attach_resume={attach_resume})...")
-        res = tars_agent.tool_send_email(
-            to=target_email,
-            subject=subject,
-            body=drafted_body,
-            attach_resume=attach_resume
-        )
-        print(f"✅ Send Email Result: {res}")
-        player.play(farewell_ulaw)
+    # Send summary of call to Telegram bot
+    if all_transcripts:
         send_telegram_summary(
-            transcript=transcript,
-            action_taken=f"Sent new email to {target_email}: '{subject}' (Resume attached: {attach_resume})",
-            sender="Mohammed Suhail (Inbound Call)",
-            subject=subject
+            transcript=" | ".join(all_transcripts),
+            action_taken=f"Inbound voice session completed ({turn} turns)",
+            sender="Mohammed Suhail (Inbound Voice Call)",
+            subject="Live Voice RAG Consultation"
         )
-    else:
-        player.play(cancel_ulaw)
 
+    # Conclude call
     time.sleep(0.5)
     _send_inbound_bye(sip_sock, contact_uri, local_ip, local_port, to_tag, from_tag, call_id, caller_ip, caller_port, routes)
     rtp_sock.close()
