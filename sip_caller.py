@@ -40,10 +40,18 @@ import math
 import wave
 import json
 import requests
+import ctypes
 import edge_tts
 import miniaudio
 import audioop
 from groq import Groq
+
+# Set Windows multimedia timer resolution to 1ms for studio-grade low jitter
+try:
+    winmm = ctypes.WinDLL('winmm')
+    winmm.timeBeginPeriod(1)
+except Exception:
+    pass
 
 # Load environment
 env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
@@ -169,7 +177,9 @@ async def generate_speech_ulaw(text: str, rate: str = VOICE_RATE, pitch: str = V
         mp3_data = b"".join(chunks)
         decoded = miniaudio.decode(mp3_data, nchannels=1, sample_rate=8000)
         raw_pcm = decoded.samples.tobytes()
-        return audioop.lin2ulaw(raw_pcm, 2)
+        # Scale to 85% to eliminate digital clipping and harsh DAC distortion on phone speakers
+        scaled_pcm = audioop.mul(raw_pcm, 2, 0.85)
+        return audioop.lin2ulaw(scaled_pcm, 2)
     except Exception as e:
         print(f"⚠️ Edge-TTS synthesis failed: {e}")
         return b"\xff" * 16000
@@ -211,7 +221,7 @@ def generate_beep_ulaw(freq=660, duration_sec=0.15) -> bytes:
 
 
 class RTPPlayer:
-    """Maintains continuous monotonic RFC 3550 RTP sequence numbers and timestamps to prevent DAC pops and jitter resets."""
+    """Maintains continuous monotonic RFC 3550 RTP sequence numbers and timestamps with sub-millisecond frame pacing."""
     def __init__(self, rtp_sock, destinations, ssrc=0x34A8129B):
         self.rtp_sock = rtp_sock
         self.destinations = destinations
@@ -241,9 +251,13 @@ class RTPPlayer:
             self.timestamp = (self.timestamp + 160) & 0xFFFFFFFF
 
             target_time = start_time + (0.02 * (idx + 1))
-            sleep_dur = target_time - time.time()
-            if sleep_dur > 0:
-                time.sleep(sleep_dur)
+            # Precision hybrid sleep: eliminates 15.6ms Windows timer jitter
+            while True:
+                rem = target_time - time.time()
+                if rem <= 0:
+                    break
+                if rem > 0.003:
+                    time.sleep(0.001)
 
 
 def stream_audio(rtp_sock, destinations, ulaw_data, repeat=1, ssrc=0x34A8129B):
@@ -389,10 +403,10 @@ def is_user_confirming_send(transcript: str, dtmf: str = None) -> bool:
     return False
 
 
-def record_user_speech(rtp_sock, max_seconds=7.0, silence_timeout=0.8, player=None) -> tuple[bytes, str]:
+def record_user_speech(rtp_sock, max_seconds=9.0, silence_timeout=1.2, player=None) -> tuple[bytes, str]:
     """
     Records incoming RTP audio packets from the user's phone microphone.
-    Rapid 0.8s silence timeout for lightning-fast turn-taking.
+    Natural 1.2s silence timeout gives comfortable room for conversational pauses.
     Supports symmetric RTP: automatically locks onto the sender's transmitting port.
     Returns (linear_pcm_bytes, dtmf_digit).
     """
@@ -429,6 +443,7 @@ def record_user_speech(rtp_sock, max_seconds=7.0, silence_timeout=0.8, player=No
             # Symmetric RTP: ensure response packets route to actual transmitting endpoint
             if player and sender_addr and (not player.destinations or sender_addr != player.destinations[0]):
                 player.destinations = [sender_addr]
+                print(f"🎯 Symmetric RTP locked onto transmitting client endpoint: {sender_addr}")
             
             cc = byte0 & 0x0F
             header_len = 12 + (cc * 4)
@@ -452,25 +467,30 @@ def record_user_speech(rtp_sock, max_seconds=7.0, silence_timeout=0.8, player=No
                 print(f"🔢 Keypad DTMF: '{dtmf_digit}'")
                 break
 
-            # 2. Decode audio payload
+            # 2. Decode audio payload (PCMU 0, PCMA 8, or raw fallback)
             linear = None
             if pt == 0:  # PCMU
                 linear = audioop.ulaw2lin(payload, 2)
             elif pt == 8:  # PCMA
                 linear = audioop.alaw2lin(payload, 2)
+            elif pt not in (101,):
+                try:
+                    linear = audioop.ulaw2lin(payload, 2)
+                except Exception:
+                    pass
             
             if linear:
                 frames.append(linear)
                 rms = audioop.rms(linear, 2)
                 
-                if rms > 280:
+                if rms > 250:
                     if not speech_detected:
                         speech_detected = True
                         print(f"🎙️ User speech detected on microphone (rms={rms})")
                     last_speech_time = time.time()
                 
-                # Rapid silence detection (0.8s) for snappy Jarvis pacing
-                if speech_detected and (time.time() - last_speech_time > silence_timeout) and len(frames) > 12:
+                # Natural silence detection (1.2s) gives enough room for natural sentence pauses
+                if speech_detected and (time.time() - last_speech_time > silence_timeout) and len(frames) > 20:
                     print(f"⏹️ Speech pause detected after {len(frames)*0.02:.1f}s")
                     break
 
@@ -631,21 +651,6 @@ def _trigger_urgent_call_impl(
         opaque=challenge["opaque"]
     )
 
-    sdp_offer = (
-        "v=0\r\n"
-        f"o=tars 123456 123456 IN IP4 {public_ip}\r\n"
-        "s=TARS Sentinel\r\n"
-        f"c=IN IP4 {public_ip}\r\n"
-        "t=0 0\r\n"
-        f"m=audio {local_rtp_port} RTP/AVP 0 8 101\r\n"
-        "a=rtpmap:0 PCMU/8000\r\n"
-        "a=rtpmap:8 PCMA/8000\r\n"
-        "a=rtpmap:101 telephone-event/8000\r\n"
-        f"a=candidate:1 1 UDP 2130706431 {local_ip} {local_rtp_port} typ host\r\n"
-        f"a=candidate:2 1 UDP 1694498815 {public_ip} {local_rtp_port} typ srflx\r\n"
-        "a=sendrecv\r\n"
-    )
-
     branch2 = "z9hG4bK" + uuid.uuid4().hex[:20]
     invite2 = (
         f"INVITE {target_sip_uri} SIP/2.0\r\n"
@@ -658,12 +663,10 @@ def _trigger_urgent_call_impl(
         f"{auth_req_name}: {auth_val}\r\n"
         "Max-Forwards: 70\r\n"
         f"User-Agent: {CALLER_DISPLAY}\r\n"
-        "Content-Type: application/sdp\r\n"
-        f"Content-Length: {len(sdp_offer)}\r\n\r\n"
-        f"{sdp_offer}"
+        "Content-Length: 0\r\n\r\n"
     )
 
-    print("🔐 Authenticating with Flexisip server (Early Offer PCMU/PCMA)...")
+    print("🔐 Authenticating with Flexisip server (Late Offer)...")
     sip_sock.sendto(invite2.encode(), (server, server_port))
 
     ringing_detected = False
@@ -714,6 +717,24 @@ def _trigger_urgent_call_impl(
         destinations = select_best_rtp_destination(callee_sdp)
         print(f"Target RTP Audio Destination: {destinations}")
 
+        is_on_lan = any(ip.startswith(("192.168.", "10.", "172.")) for ip, _ in destinations)
+        advertised_ip = local_ip if is_on_lan else public_ip
+
+        sdp_answer = (
+            "v=0\r\n"
+            f"o=tars 123456 123456 IN IP4 {advertised_ip}\r\n"
+            "s=TARS Sentinel\r\n"
+            f"c=IN IP4 {advertised_ip}\r\n"
+            "t=0 0\r\n"
+            f"m=audio {local_rtp_port} RTP/AVP 0 8 101\r\n"
+            "a=rtpmap:0 PCMU/8000\r\n"
+            "a=rtpmap:8 PCMA/8000\r\n"
+            "a=rtpmap:101 telephone-event/8000\r\n"
+            "a=fmtp:101 0-15\r\n"
+            "a=sendrecv\r\n"
+            "a=rtcp-mux\r\n"
+        )
+
         route_hdr = ""
         if routes:
             route_hdr = "Route: " + ", ".join(routes) + "\r\n"
@@ -729,7 +750,9 @@ def _trigger_urgent_call_impl(
             f"CSeq: 2 ACK\r\n"
             "Max-Forwards: 70\r\n"
             f"User-Agent: {CALLER_DISPLAY}\r\n"
-            "Content-Length: 0\r\n\r\n"
+            "Content-Type: application/sdp\r\n"
+            f"Content-Length: {len(sdp_answer)}\r\n\r\n"
+            f"{sdp_answer}"
         )
         sip_sock.sendto(ack2.encode(), (server, server_port))
 
@@ -759,9 +782,9 @@ def _trigger_urgent_call_impl(
             player.play(beep_ulaw)
 
         # -------------------------------------------------------------
-        # TURN 2: USER DICTATES INSTRUCTIONS (Snappy 0.8s Silence Cut)
+        # TURN 2: USER DICTATES INSTRUCTIONS (Natural 1.2s Silence Cut)
         # -------------------------------------------------------------
-        user_pcm, dtmf_digit = record_user_speech(rtp_sock, max_seconds=7.0, silence_timeout=0.8, player=player)
+        user_pcm, dtmf_digit = record_user_speech(rtp_sock, max_seconds=9.0, silence_timeout=1.2, player=player)
 
         # Instant 0ms filler audio: No dead silence!
         if destinations:
@@ -774,6 +797,15 @@ def _trigger_urgent_call_impl(
             transcript = "Cancel, don't send"
         elif len(user_pcm) >= 1500:
             transcript = transcribe_pcm_audio(user_pcm)
+
+        if not transcript:
+            # One retry if quiet
+            retry_prompt = asyncio.run(generate_speech_ulaw("I'm listening boss, what should I tell them?", rate=VOICE_RATE, pitch=VOICE_PITCH))
+            if destinations:
+                player.play(retry_prompt)
+                player.play(beep_ulaw)
+            user_pcm, dtmf_digit = record_user_speech(rtp_sock, max_seconds=8.0, silence_timeout=1.2, player=player)
+            transcript = transcribe_pcm_audio(user_pcm) if len(user_pcm) >= 1500 else ""
 
         print(f"\n=======================================================")
         print(f"🗣️ USER INSTRUCTION RECEIVED: '{transcript}'")
@@ -806,8 +838,8 @@ def _trigger_urgent_call_impl(
                 player.play(confirm_q_ulaw)
                 player.play(beep_ulaw)
 
-            # Listen for quick confirmation (0.6s silence timeout)
-            confirm_pcm, confirm_dtmf = record_user_speech(rtp_sock, max_seconds=4.0, silence_timeout=0.6, player=player)
+            # Listen for quick confirmation (1.0s natural silence timeout)
+            confirm_pcm, confirm_dtmf = record_user_speech(rtp_sock, max_seconds=5.0, silence_timeout=1.0, player=player)
             confirm_transcript = transcribe_pcm_audio(confirm_pcm) if len(confirm_pcm) >= 1500 else ""
             user_confirmed = is_user_confirming_send(confirm_transcript, confirm_dtmf)
 
@@ -1067,7 +1099,7 @@ def handle_inbound_voice_session(rtp_sock, destinations, call_id, from_tag, to_t
     player.play(beep_ulaw)
 
     # 2. Record command (pass player so symmetric RTP locks onto phone's incoming port)
-    user_pcm, dtmf_digit = record_user_speech(rtp_sock, max_seconds=8.0, silence_timeout=0.9, player=player)
+    user_pcm, dtmf_digit = record_user_speech(rtp_sock, max_seconds=9.0, silence_timeout=1.2, player=player)
     player.play(ack_drafting_ulaw)
 
     transcript = transcribe_pcm_audio(user_pcm) if len(user_pcm) >= 1500 else ""
@@ -1078,7 +1110,7 @@ def handle_inbound_voice_session(rtp_sock, destinations, call_id, from_tag, to_t
         retry_prompt = asyncio.run(generate_speech_ulaw("I didn't catch that boss. Who would you like me to email, and what should I say?", rate=VOICE_RATE, pitch=VOICE_PITCH))
         player.play(retry_prompt)
         player.play(beep_ulaw)
-        user_pcm, dtmf_digit = record_user_speech(rtp_sock, max_seconds=8.0, silence_timeout=0.9, player=player)
+        user_pcm, dtmf_digit = record_user_speech(rtp_sock, max_seconds=9.0, silence_timeout=1.2, player=player)
         transcript = transcribe_pcm_audio(user_pcm) if len(user_pcm) >= 1500 else ""
         print(f"🗣️ BOSS INBOUND RETRY COMMAND: '{transcript}'")
 
@@ -1096,7 +1128,7 @@ def handle_inbound_voice_session(rtp_sock, destinations, call_id, from_tag, to_t
     subject = parsed.get("subject", "Regarding our conversation")
     drafted_body = parsed.get("drafted_body", "")
     attach_resume = parsed.get("attach_resume", True)
-    spoken_confirmation = parsed.get("spoken_confirmation", "Should I send this email now, boss?")
+    spoken_confirmation = parsed.get("spoken_confirmation", f"Got it boss. I'll email {recip_query} saying what you wanted, and attach your resume. Should I send it now, boss?")
 
     # 4. Confirm with user
     print(f"🗣️ TARS Inbound Confirming: '{spoken_confirmation}'")
@@ -1104,7 +1136,7 @@ def handle_inbound_voice_session(rtp_sock, destinations, call_id, from_tag, to_t
     player.play(confirm_q_ulaw)
     player.play(beep_ulaw)
 
-    confirm_pcm, confirm_dtmf = record_user_speech(rtp_sock, max_seconds=4.0, silence_timeout=0.6, player=player)
+    confirm_pcm, confirm_dtmf = record_user_speech(rtp_sock, max_seconds=5.0, silence_timeout=1.0, player=player)
     confirm_transcript = transcribe_pcm_audio(confirm_pcm) if len(confirm_pcm) >= 1500 else ""
     user_confirmed = is_user_confirming_send(confirm_transcript, confirm_dtmf)
     print(f"🗣️ BOSS CONFIRMATION: '{confirm_transcript}' | Decision: {user_confirmed}")
@@ -1332,9 +1364,9 @@ def run_inbound_sip_server(port=5060):
                     "a=rtpmap:0 PCMU/8000\r\n"
                     "a=rtpmap:8 PCMA/8000\r\n"
                     "a=rtpmap:101 telephone-event/8000\r\n"
-                    f"a=candidate:1 1 UDP 2130706431 {local_ip} {local_rtp_port} typ host\r\n"
-                    f"a=candidate:2 1 UDP 1694498815 {public_ip} {local_rtp_port} typ srflx\r\n"
+                    "a=fmtp:101 0-15\r\n"
                     "a=sendrecv\r\n"
+                    "a=rtcp-mux\r\n"
                 )
 
                 resp_200 = (
@@ -1345,7 +1377,7 @@ def run_inbound_sip_server(port=5060):
                     f"Call-ID: {call_id}\r\n"
                     f"CSeq: {cseq}\r\n"
                     f"{route_headers_str}"
-                    f"Contact: <sip:{username}@{public_ip}:{port};transport=UDP>\r\n"
+                    f"Contact: <sip:{username}@{advertised_ip}:{port};transport=UDP>\r\n"
                     f"User-Agent: {CALLER_DISPLAY}\r\n"
                     "Content-Type: application/sdp\r\n"
                     f"Content-Length: {len(sdp_answer)}\r\n\r\n"
@@ -1353,8 +1385,7 @@ def run_inbound_sip_server(port=5060):
                 )
 
                 sock.sendto(resp_200.encode(), addr)
-                print(f"🎉 Answered inbound call with 200 OK! RTP Audio port: {local_rtp_port}")
-
+                print(f"🎉 Answered inbound call with 200 OK! Advertised: {advertised_ip}:{local_rtp_port}")
 
                 t = threading.Thread(
                     target=handle_inbound_voice_session,
@@ -1363,6 +1394,9 @@ def run_inbound_sip_server(port=5060):
                     name="TARS-Inbound-Call"
                 )
                 t.start()
+
+            elif first_line.startswith("ACK"):
+                print(f"🤝 Inbound SIP call ACK confirmed from {addr[0]}:{addr[1]} - Call dialog active!")
 
             elif first_line.startswith("OPTIONS"):
                 via_lines = re.findall(r'(Via:\s*[^\r\n]+)', msg, re.IGNORECASE)
