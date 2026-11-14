@@ -75,9 +75,9 @@ groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-VOICE_MODEL = "en-GB-RyanNeural"  # Marvel's JARVIS British Voice (Paul Bettany)
-VOICE_PITCH = "+0Hz"               # Studio natural pitch - crisp, zero distortion
-VOICE_RATE = "+3%"                # Smooth conversational cadence
+VOICE_MODEL = "en-GB-ThomasNeural"  # Marvel's JARVIS British Voice (Crisp, refined, Paul Bettany)
+VOICE_PITCH = "+0Hz"                # Studio natural pitch - crisp, zero distortion
+VOICE_RATE = "+10%"                 # Crisp, brisk, high-tech conversational cadence
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_audio_cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 _SIP_CALL_LOCK = threading.Lock()
@@ -819,6 +819,23 @@ def _trigger_urgent_call_impl(
         synth_t.join(timeout=8.0)
         greeting_ulaw = greeting_holder[0] or (b"\xff" * 16000)
 
+        # -------------------------------------------------------------
+        # SYMMETRIC RTP PRE-LOCK: Lock onto phone's incoming RTP endpoint before playing frame 1
+        # Linphone transmits RTP packets immediately upon answering.
+        # Locking here prevents playing the initial greeting into a WAN blackhole or causing jitter gaps!
+        # -------------------------------------------------------------
+        rtp_sock.settimeout(0.05)
+        prelock_start = time.time()
+        while time.time() - prelock_start < 0.5:
+            try:
+                data, s_addr = rtp_sock.recvfrom(2048)
+                if len(data) >= 12 and s_addr:
+                    print(f"🎯 Symmetric RTP pre-locked onto active phone endpoint: {s_addr}")
+                    destinations = [s_addr]
+                    break
+            except Exception:
+                pass
+
         # Initialize continuous RTP player for unbroken audio stream (prevents pops/clicks)
         player = RTPPlayer(rtp_sock, destinations)
 
@@ -1134,6 +1151,19 @@ Respond ONLY with valid JSON:
 
 def handle_inbound_voice_session(rtp_sock, destinations, call_id, from_tag, to_tag, contact_uri, caller_ip, caller_port, sip_sock, local_ip, local_port, routes=None):
     """Executes full interactive AI voice agent when Suhail calls in."""
+    # Pre-lock symmetric RTP if incoming audio packet is ready
+    rtp_sock.settimeout(0.05)
+    prelock_start = time.time()
+    while time.time() - prelock_start < 0.4:
+        try:
+            data, s_addr = rtp_sock.recvfrom(2048)
+            if len(data) >= 12 and s_addr:
+                print(f"🎯 Symmetric RTP pre-locked onto active inbound endpoint: {s_addr}")
+                destinations = [s_addr]
+                break
+        except Exception:
+            pass
+
     player = RTPPlayer(rtp_sock, destinations)
     beep_ulaw = generate_beep_ulaw(freq=800, duration_sec=0.18)
     inbound_greeting = get_or_create_cached_audio("inbound_greeting", "Hello boss, I'm listening. Who would you like me to email, and what should I say?")
