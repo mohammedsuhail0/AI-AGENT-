@@ -55,10 +55,10 @@ if os.path.exists(env_path):
                 k, v = line.split("=", 1)
                 os.environ.setdefault(k.strip(), v.strip().strip("'\""))
 
-LINPHONE_USERNAME = os.environ.get("LINPHONE_USERNAME", "mohammed_suhail")
-LINPHONE_PASSWORD = os.environ.get("LINPHONE_PASSWORD", "Suhail2016")
-LINPHONE_DOMAIN = os.environ.get("LINPHONE_DOMAIN", "sip.linphone.org")
-LINPHONE_TARGET = os.environ.get("LINPHONE_TARGET_URI", f"sip:{LINPHONE_USERNAME}@{LINPHONE_DOMAIN}")
+LINPHONE_USERNAME = os.environ.get("TARS_SIP_USERNAME", os.environ.get("LINPHONE_USERNAME", "suhail_tars"))
+LINPHONE_PASSWORD = os.environ.get("TARS_SIP_PASSWORD", os.environ.get("LINPHONE_PASSWORD", "iD_6W_6kZyC#Tnp"))
+LINPHONE_DOMAIN = os.environ.get("TARS_SIP_DOMAIN", os.environ.get("LINPHONE_DOMAIN", "sip.linphone.org"))
+LINPHONE_TARGET = os.environ.get("USER_SIP_URI", os.environ.get("LINPHONE_TARGET_URI", "sip:mohammed_suhail@sip.linphone.org"))
 CALLER_DISPLAY = os.environ.get("CALLER_DISPLAY_NAME", "TARS")
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
@@ -67,9 +67,30 @@ groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-VOICE_MODEL = "en-US-AndrewMultilingualNeural"  # Crisp, warm, human conversational voice
+VOICE_MODEL = "en-GB-RyanNeural"  # Marvel's JARVIS British Voice (Paul Bettany)
+VOICE_PITCH = "+0Hz"               # Studio natural pitch - crisp, zero distortion
+VOICE_RATE = "+3%"                # Smooth conversational cadence
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_audio_cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
+_SIP_CALL_LOCK = threading.Lock()
+_CACHED_PUBLIC_IP = None
+
+
+def get_public_ip() -> str:
+    """Finds the external public WAN IP address."""
+    global _CACHED_PUBLIC_IP
+    if _CACHED_PUBLIC_IP:
+        return _CACHED_PUBLIC_IP
+    for url in ["https://api.ipify.org", "https://ifconfig.me/ip", "https://icanhazip.com"]:
+        try:
+            r = requests.get(url, timeout=3)
+            if r.status_code == 200 and r.text.strip():
+                _CACHED_PUBLIC_IP = r.text.strip()
+                return _CACHED_PUBLIC_IP
+        except Exception:
+            continue
+    _CACHED_PUBLIC_IP = "117.99.202.109"
+    return _CACHED_PUBLIC_IP
 
 
 def get_local_ip() -> str:
@@ -82,6 +103,7 @@ def get_local_ip() -> str:
         return ip
     except Exception:
         return "192.168.1.2"
+
 
 
 def parse_auth_challenge(resp, auth_header_name="WWW-Authenticate"):
@@ -139,10 +161,10 @@ def make_rtp_packet(seq, timestamp, ssrc, payload, marker=False, pt=0):
     return header + payload
 
 
-async def generate_speech_ulaw(text: str, rate: str = "+15%") -> bytes:
-    """Synthesizes high-fidelity speech using Edge-TTS with brisk rate (+15%) and converts to 8kHz u-law."""
+async def generate_speech_ulaw(text: str, rate: str = VOICE_RATE, pitch: str = VOICE_PITCH) -> bytes:
+    """Synthesizes high-fidelity speech using Edge-TTS configured for Marvel's JARVIS (Paul Bettany) and converts to 8kHz u-law."""
     try:
-        comm = edge_tts.Communicate(text, VOICE_MODEL, rate=rate)
+        comm = edge_tts.Communicate(text, VOICE_MODEL, rate=rate, pitch=pitch)
         chunks = [c["data"] async for c in comm.stream() if c["type"] == "audio"]
         mp3_data = b"".join(chunks)
         decoded = miniaudio.decode(mp3_data, nchannels=1, sample_rate=8000)
@@ -162,7 +184,7 @@ def get_or_create_cached_audio(name: str, text: str) -> bytes:
                 return f.read()
         except Exception:
             pass
-    ulaw = asyncio.run(generate_speech_ulaw(text, rate="+15%"))
+    ulaw = asyncio.run(generate_speech_ulaw(text, rate=VOICE_RATE, pitch=VOICE_PITCH))
     try:
         with open(path, "wb") as f:
             f.write(ulaw)
@@ -309,16 +331,16 @@ def parse_user_intent_and_draft(transcript: str, email_subject: str, email_sende
     clean_first_name = email_sender.split()[0].replace('"', '') if email_sender else "there"
 
     if groq_client:
-        prompt = f"""You are TARS, executive voice AI assistant on a live phone call with Mohammed Suhail. Address the user as 'sir'.
+        prompt = f"""You are TARS, executive voice AI assistant speaking on a live phone call with Mohammed Suhail. Always address him naturally as 'boss'. Keep it completely natural, crisp, and direct (no sci-fi jargon).
 Incoming email from: {email_sender}
 Subject: {email_subject}
 Content: {email_body[:600]}
 
-The user dictated this instruction on the call:
+The boss dictated this instruction on the call:
 "{transcript}"
 
 Do TWO tasks in valid JSON:
-1. 'spoken_confirmation': A crisp, ultra-short sentence TARS speaks back to Suhail to verify before sending (e.g. "Understood sir. I'll let {clean_first_name} know you can meet Sunday, and attach your resume. Send it now, sir?").
+1. 'spoken_confirmation': A crisp, natural sentence TARS speaks back to Suhail to verify before sending (e.g. "Got it boss. I'll let {clean_first_name} know you can meet Sunday, and attach your resume. Should I send it now, boss?").
 2. 'drafted_body': The professional, concise reply email body (plain text, no placeholder brackets) signed 'Best regards,\nMohammed Suhail'.
 
 Respond ONLY with valid JSON:
@@ -326,7 +348,7 @@ Respond ONLY with valid JSON:
   "intent": "CUSTOM_REPLY" | "CONFIRM_SEND" | "CANCEL",
   "instruction": "Summary of user command",
   "attach_resume": true or false,
-  "spoken_confirmation": "Short question asking to confirm, addressing Suhail as sir",
+  "spoken_confirmation": "Short natural question asking to confirm, addressing Suhail as boss",
   "drafted_body": "Full professional email reply text"
 }}"""
         for model in ["qwen/qwen3.8-27b", "openai/gpt-oss-20b"]:
@@ -348,7 +370,7 @@ Respond ONLY with valid JSON:
         "intent": "CONFIRM_SEND",
         "instruction": f"Confirm meeting and reply: '{transcript}'. Attach resume.",
         "attach_resume": True,
-        "spoken_confirmation": f"Understood sir. I'll reply with your instructions and attach your resume. Send it now, sir?",
+        "spoken_confirmation": f"Got it boss. I'll reply with your instructions and attach your resume. Should I send it now, boss?",
         "drafted_body": fallback_body
     }
 
@@ -367,10 +389,11 @@ def is_user_confirming_send(transcript: str, dtmf: str = None) -> bool:
     return False
 
 
-def record_user_speech(rtp_sock, max_seconds=6.0, silence_timeout=0.8) -> tuple[bytes, str]:
+def record_user_speech(rtp_sock, max_seconds=7.0, silence_timeout=0.8, player=None) -> tuple[bytes, str]:
     """
     Records incoming RTP audio packets from the user's phone microphone.
     Rapid 0.8s silence timeout for lightning-fast turn-taking.
+    Supports symmetric RTP: automatically locks onto the sender's transmitting port.
     Returns (linear_pcm_bytes, dtmf_digit).
     """
     # Drain any buffered packets from socket
@@ -391,9 +414,13 @@ def record_user_speech(rtp_sock, max_seconds=6.0, silence_timeout=0.8) -> tuple[
     
     while time.time() - start_time < max_seconds:
         try:
-            data, _ = rtp_sock.recvfrom(2048)
+            data, sender_addr = rtp_sock.recvfrom(2048)
             if len(data) < 12:
                 continue
+            
+            # Symmetric RTP: ensure response packets route to actual transmitting endpoint
+            if player and sender_addr and (not player.destinations or sender_addr != player.destinations[0]):
+                player.destinations = [sender_addr]
             
             byte0, byte1, seq, ts, ssrc = struct.unpack("!BBHII", data[:12])
             pt = byte1 & 0x7F
@@ -431,13 +458,13 @@ def record_user_speech(rtp_sock, max_seconds=6.0, silence_timeout=0.8) -> tuple[
                 frames.append(linear)
                 rms = audioop.rms(linear, 2)
                 
-                if rms > 420:
+                if rms > 320:
                     if not speech_detected:
                         speech_detected = True
                     last_speech_time = time.time()
                 
                 # Rapid silence detection (0.8s) for snappy Jarvis pacing
-                if speech_detected and (time.time() - last_speech_time > silence_timeout) and len(frames) > 15:
+                if speech_detected and (time.time() - last_speech_time > silence_timeout) and len(frames) > 12:
                     break
 
         except socket.timeout:
@@ -447,6 +474,7 @@ def record_user_speech(rtp_sock, max_seconds=6.0, silence_timeout=0.8) -> tuple[
             
     pcm_bytes = b"".join(frames)
     return pcm_bytes, dtmf_digit
+
 
 
 def send_telegram_summary(transcript: str, action_taken: str, sender: str, subject: str):
@@ -468,7 +496,7 @@ def send_telegram_summary(transcript: str, action_taken: str, sender: str, subje
         print(f"⚠️ Telegram notification error: {e}")
 
 
-def trigger_urgent_call(
+def _trigger_urgent_call_impl(
     subject: str = "Urgent Email",
     sender: str = "",
     reason: str = "",
@@ -476,20 +504,12 @@ def trigger_urgent_call(
     body: str = "",
     ring_timeout: int = 60
 ) -> bool:
-    """
-    Ultra-Fast Autonomous Jarvis Voice Sentinel:
-    - Caller ID displays "TARS" on phone screen.
-    - Speaks concise briefing (<4s) addressing user as "Sir".
-    - Instant pre-cached audio fillers eliminate all dead silence.
-    - Two-way confirmation loop verifies draft before sending.
-    - Dispatches pre-drafted email in 300ms upon confirmation.
-    """
     server = LINPHONE_DOMAIN
     server_port = 5060
     username = LINPHONE_USERNAME
     password = LINPHONE_PASSWORD
     target_sip_uri = LINPHONE_TARGET
-    public_ip = "117.99.202.109"
+    public_ip = get_public_ip()
     local_ip = get_local_ip()
 
     clean_sender = sender.split("<")[0].strip().replace('"', '') if sender else "an important contact"
@@ -498,30 +518,31 @@ def trigger_urgent_call(
         clean_subject = "Meeting Request"
     clean_reason = reason.replace('"', '').strip() if reason else ""
 
-    # Crisp, punchy Jarvis Briefing Script (under 14 words = ~3.5s speaking time)
+    # Crisp, punchy Marvel JARVIS Briefing Script (under 16 words = ~3.5s speaking time)
     briefing_text = (
-        f"Hello Suhail sir, TARS here. Urgent email from {clean_sender}: "
-        f"{clean_reason or clean_subject}. What should I reply?"
+        f"Hello boss, we got an email from {clean_sender}. "
+        f"{clean_reason or clean_subject}. What should we reply?"
     )
 
     print(f"\n=======================================================")
-    print(f"🚨 TARS CALLER - ULTRA FAST JARVIS ENGINE")
+    print(f"🚨 TARS CALLER - EXECUTIVE SENTINEL ENGINE")
     print(f"Caller ID: {CALLER_DISPLAY}")
     print(f"Target: {target_sip_uri}")
     print(f"Sender: {clean_sender}")
     print(f"Subject: {clean_subject}")
+    print(f"Voice: British Executive (en-GB-RyanNeural, rate={VOICE_RATE})")
     print(f"=======================================================")
 
     # Load pre-cached static filler assets instantly (0.001s)
-    ack_drafting_ulaw = get_or_create_cached_audio("ack_drafting", "Understood sir, drafting now.")
-    ack_sending_ulaw = get_or_create_cached_audio("ack_sending", "Sending now, sir.")
-    farewell_ulaw = get_or_create_cached_audio("farewell", "Affirmative sir. Reply dispatched with resume attached. Have a great day!")
+    ack_drafting_ulaw = get_or_create_cached_audio("ack_drafting", "On it boss, drafting that now.")
+    ack_sending_ulaw = get_or_create_cached_audio("ack_sending", "Sending it right now, boss.")
+    farewell_ulaw = get_or_create_cached_audio("farewell", "All done boss! Email sent with your resume attached. Have a great day!")
     beep_ulaw = generate_beep_ulaw(freq=800, duration_sec=0.18)
 
     # Start synthesizing custom briefing audio in parallel thread
     greeting_holder = [None]
     def _synth_worker():
-        greeting_holder[0] = asyncio.run(generate_speech_ulaw(briefing_text, rate="+15%"))
+        greeting_holder[0] = asyncio.run(generate_speech_ulaw(briefing_text, rate=VOICE_RATE, pitch=VOICE_PITCH))
     synth_t = threading.Thread(target=_synth_worker, daemon=True)
     synth_t.start()
 
@@ -634,7 +655,8 @@ def trigger_urgent_call(
             first_line = msg.splitlines()[0] if msg.splitlines() else "EMPTY"
 
             if "110 Push sent" in msg:
-                print("📲 FCM push notification sent to Android phone!")
+                print("📲 FCM push notification sent to Android phone! Waking up device...")
+                ring_start = time.time()  # Give full timeout window from the moment push is transmitted
             elif "180 Ringing" in msg:
                 if not ringing_detected:
                     print(f"\n🔔🔔🔔 PHONE IS RINGING! [Caller: {CALLER_DISPLAY}] 🔔🔔🔔")
@@ -731,7 +753,7 @@ def trigger_urgent_call(
         # -------------------------------------------------------------
         # TURN 2: USER DICTATES INSTRUCTIONS (Snappy 0.8s Silence Cut)
         # -------------------------------------------------------------
-        user_pcm, dtmf_digit = record_user_speech(rtp_sock, max_seconds=6.0, silence_timeout=0.8)
+        user_pcm, dtmf_digit = record_user_speech(rtp_sock, max_seconds=7.0, silence_timeout=0.8, player=player)
 
         # Instant 0ms filler audio: No dead silence!
         if destinations:
@@ -742,7 +764,7 @@ def trigger_urgent_call(
             transcript = "Confirm and send resume"
         elif dtmf_digit == "2":
             transcript = "Cancel, don't send"
-        elif len(user_pcm) >= 2500:
+        elif len(user_pcm) >= 1500:
             transcript = transcribe_pcm_audio(user_pcm)
 
         print(f"\n=======================================================")
@@ -758,27 +780,27 @@ def trigger_urgent_call(
         )
         intent = analysis.get("intent", "CUSTOM_REPLY")
         attach_resume = analysis.get("attach_resume", True)
-        spoken_confirmation = analysis.get("spoken_confirmation", "Shall I send this now, sir?")
+        spoken_confirmation = analysis.get("spoken_confirmation", "Shall I send this now, boss?")
         drafted_body = analysis.get("drafted_body", "")
 
         # -------------------------------------------------------------
         # TURN 3: VERIFY WITH USER BEFORE SENDING
         # -------------------------------------------------------------
         if intent == "CANCEL":
-            cancel_audio = get_or_create_cached_audio("cancel", "Understood sir. Email canceled. Standing by.")
+            cancel_audio = get_or_create_cached_audio("cancel", "No problem boss, canceled.")
             if destinations:
                 player.play(cancel_audio)
             action_summary = "Email canceled as requested"
         else:
             print(f"🗣️ TARS Confirming with User: '{spoken_confirmation}'")
-            confirm_q_ulaw = asyncio.run(generate_speech_ulaw(spoken_confirmation, rate="+15%"))
+            confirm_q_ulaw = asyncio.run(generate_speech_ulaw(spoken_confirmation, rate=VOICE_RATE, pitch=VOICE_PITCH))
             if destinations:
                 player.play(confirm_q_ulaw)
                 player.play(beep_ulaw)
 
             # Listen for quick confirmation (0.6s silence timeout)
-            confirm_pcm, confirm_dtmf = record_user_speech(rtp_sock, max_seconds=4.0, silence_timeout=0.6)
-            confirm_transcript = transcribe_pcm_audio(confirm_pcm) if len(confirm_pcm) >= 2000 else ""
+            confirm_pcm, confirm_dtmf = record_user_speech(rtp_sock, max_seconds=4.0, silence_timeout=0.6, player=player)
+            confirm_transcript = transcribe_pcm_audio(confirm_pcm) if len(confirm_pcm) >= 1500 else ""
             user_confirmed = is_user_confirming_send(confirm_transcript, confirm_dtmf)
 
             print(f"🗣️ USER CONFIRMATION: '{confirm_transcript}' | Decision: {user_confirmed}")
@@ -807,7 +829,7 @@ def trigger_urgent_call(
                 if destinations:
                     player.play(farewell_ulaw)
             else:
-                farewell_cancel = get_or_create_cached_audio("cancel", "Understood sir. Email canceled. Standing by.")
+                farewell_cancel = get_or_create_cached_audio("cancel", "No problem boss, canceled.")
                 if destinations:
                     player.play(farewell_cancel)
                 action_summary = "Held for manual review in Telegram bot"
@@ -837,7 +859,7 @@ def trigger_urgent_call(
         )
         sip_sock.sendto(bye.encode(), (server, server_port))
         print("📴 Call concluded cleanly. BYE sent.")
-    elif ringing_detected:
+    elif not call_answered:
         cancel = (
             f"CANCEL {target_sip_uri} SIP/2.0\r\n"
             f"Via: SIP/2.0/UDP {public_ip}:{local_sip_port};branch={branch2};rport\r\n"
@@ -849,11 +871,58 @@ def trigger_urgent_call(
             "Content-Length: 0\r\n\r\n"
         )
         sip_sock.sendto(cancel.encode(), (server, server_port))
-        print("🔕 Ringing timed out. CANCEL sent.")
+        if ringing_detected:
+            print("🔕 Ringing timed out. CANCEL sent.")
+        else:
+            print("🔕 Push delivered, but phone did not ring. CANCEL sent.")
+
+        if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+            try:
+                alert_txt = (
+                    f"⚠️ *TARS Voice Call Missed / Unanswered*\n"
+                    f"👤 *Sender:* `{clean_sender}`\n"
+                    f"📌 *Subject:* `{clean_subject}`\n"
+                    f"📱 *Status:* Call was not answered. Please check Linphone app permissions."
+                )
+                url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+                requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": alert_txt, "parse_mode": "Markdown"}, timeout=4)
+            except Exception:
+                pass
 
     sip_sock.close()
     rtp_sock.close()
     return ringing_detected or call_answered
+
+
+def trigger_urgent_call(
+    subject: str = "Urgent Email",
+    sender: str = "",
+    reason: str = "",
+    email_id: str = None,
+    body: str = "",
+    ring_timeout: int = 60
+) -> bool:
+    """
+    Ultra-Fast Autonomous Jarvis Voice Sentinel:
+    - Caller ID displays "TARS" on phone screen.
+    - Speaks concise briefing (<4s) addressing user as "boss".
+    - Two-way confirmation loop verifies draft before sending.
+    - Dispatches pre-drafted email in 300ms upon confirmation.
+    """
+    if not _SIP_CALL_LOCK.acquire(blocking=False):
+        print("⚠️ Another SIP call is currently active. Dropping duplicate call request.")
+        return False
+    try:
+        return _trigger_urgent_call_impl(
+            subject=subject,
+            sender=sender,
+            reason=reason,
+            email_id=email_id,
+            body=body,
+            ring_timeout=ring_timeout
+        )
+    finally:
+        _SIP_CALL_LOCK.release()
 
 
 def trigger_urgent_call_async(
@@ -882,9 +951,443 @@ def trigger_urgent_call_async(
     return t
 
 
+
+# =====================================================================
+# INBOUND AI CALL SENTINEL (YOU CAN CALL TARS TO DICTATE EMAILS!)
+# =====================================================================
+
+KNOWN_CONTACTS = {
+    "samer": "mdsameeruddintab.1@gmail.com",
+    "sameer": "mdsameeruddintab.1@gmail.com",
+    "suhail": "mdsuhail.tab.1@gmail.com",
+    "tab": "mdsameeruddintab.1@gmail.com",
+}
+
+
+def resolve_contact_email(name_query: str) -> str:
+    """Resolves a dictated name or email to an actual email address."""
+    if not name_query:
+        return "mdsameeruddintab.1@gmail.com"
+    clean = name_query.lower().strip()
+    clean_norm = clean.replace(" at ", "@").replace(" dot ", ".").replace(" ", "")
+    email_match = re.search(r'[\w\.-]+@[\w\.-]+\.\w+', clean_norm)
+    if email_match:
+        return email_match.group(0)
+
+    for k, v in KNOWN_CONTACTS.items():
+        if k in clean:
+            return v
+
+    try:
+        import check_emails
+        gmail = check_emails.get_gmail_service()
+        if gmail:
+            res = gmail.users().messages().list(userId='me', q=name_query, maxResults=3).execute()
+            messages = res.get('messages', [])
+            for m_meta in messages:
+                m_det = gmail.users().messages().get(userId='me', id=m_meta['id'], format='full').execute()
+                hdrs = check_emails.clean_email_headers(m_det)
+                from_hdr = hdrs.get('From', '')
+                e_match = re.search(r'<([^>]+)>', from_hdr)
+                if e_match:
+                    return e_match.group(1)
+                elif "@" in from_hdr:
+                    return from_hdr.strip()
+    except Exception as e:
+        print(f"⚠️ Contact search error: {e}")
+
+    return "mdsameeruddintab.1@gmail.com"
+
+
+def parse_inbound_email_dictation(transcript: str) -> dict:
+    """Parses user's spoken command when they call TARS (e.g. 'Mail Samer that I am free Sunday and attach my resume')."""
+    if groq_client:
+        prompt = f"""You are TARS, executive voice AI assistant speaking on a live phone call with Mohammed Suhail.
+Suhail called you and dictated this instruction:
+"{transcript}"
+
+Analyze what Suhail wants to send:
+1. 'recipient_name': The person or name mentioned (e.g. 'Samer', 'Sameer').
+2. 'subject': A professional, concise subject line.
+3. 'drafted_body': The full, professional email body signed 'Best regards,\nMohammed Suhail'.
+4. 'attach_resume': true if he mentions resume, CV, or job opportunity, else false.
+5. 'spoken_confirmation': A crisp, natural sentence TARS speaks back to Suhail addressing him as 'boss' (e.g. "Got it boss. I'll email Samer saying you're available on Sunday, and attach your resume. Should I send it now, boss?").
+
+Respond ONLY with valid JSON:
+{{
+  "recipient_name": "name",
+  "subject": "subject",
+  "drafted_body": "body",
+  "attach_resume": true or false,
+  "spoken_confirmation": "confirmation question addressing Suhail as boss"
+}}"""
+        for model in ["qwen/qwen3.8-27b", "openai/gpt-oss-20b"]:
+            try:
+                resp = groq_client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    response_format={"type": "json_object"}
+                )
+                data = json.loads(resp.choices[0].message.content)
+                if data and "drafted_body" in data:
+                    return data
+            except Exception:
+                continue
+
+    return {
+        "recipient_name": "Samer",
+        "subject": "Regarding our conversation",
+        "drafted_body": f"Hi Samer,\n\nFollowing up on our conversation: {transcript}.\n\nPlease find my resume attached for your review.\n\nBest regards,\nMohammed Suhail",
+        "attach_resume": True,
+        "spoken_confirmation": "Got it boss. I'll draft the email to Samer with your resume attached. Should I send it now, boss?"
+    }
+
+
+def handle_inbound_voice_session(rtp_sock, destinations, call_id, from_tag, to_tag, contact_uri, caller_ip, caller_port, sip_sock, local_ip, local_port, routes=None):
+    """Executes full interactive AI voice agent when Suhail calls in."""
+    player = RTPPlayer(rtp_sock, destinations)
+    beep_ulaw = generate_beep_ulaw(freq=800, duration_sec=0.18)
+    inbound_greeting = get_or_create_cached_audio("inbound_greeting", "Hello boss, I'm listening. Who would you like me to email, and what should I say?")
+    ack_drafting_ulaw = get_or_create_cached_audio("ack_drafting", "On it boss, drafting that now.")
+    ack_sending_ulaw = get_or_create_cached_audio("ack_sending", "Sending it right now, boss.")
+    farewell_ulaw = get_or_create_cached_audio("farewell", "All done boss! Email sent with your resume attached. Have a great day!")
+    cancel_ulaw = get_or_create_cached_audio("cancel", "No problem boss, canceled.")
+
+    # 1. Greet
+    print("🗣️ Inbound TARS: Speaking greeting to boss...")
+    player.play(inbound_greeting)
+    player.play(beep_ulaw)
+
+    # 2. Record command (pass player so symmetric RTP locks onto phone's incoming port)
+    user_pcm, dtmf_digit = record_user_speech(rtp_sock, max_seconds=8.0, silence_timeout=0.9, player=player)
+    player.play(ack_drafting_ulaw)
+
+    transcript = transcribe_pcm_audio(user_pcm) if len(user_pcm) >= 1500 else ""
+    print(f"\n🗣️ BOSS INBOUND COMMAND: '{transcript}'")
+
+    if not transcript:
+        # One retry if quiet
+        retry_prompt = asyncio.run(generate_speech_ulaw("I didn't catch that boss. Who would you like me to email, and what should I say?", rate=VOICE_RATE, pitch=VOICE_PITCH))
+        player.play(retry_prompt)
+        player.play(beep_ulaw)
+        user_pcm, dtmf_digit = record_user_speech(rtp_sock, max_seconds=8.0, silence_timeout=0.9, player=player)
+        transcript = transcribe_pcm_audio(user_pcm) if len(user_pcm) >= 1500 else ""
+        print(f"🗣️ BOSS INBOUND RETRY COMMAND: '{transcript}'")
+
+    if not transcript:
+        player.play(cancel_ulaw)
+        time.sleep(0.5)
+        _send_inbound_bye(sip_sock, contact_uri, local_ip, local_port, to_tag, from_tag, call_id, caller_ip, caller_port, routes)
+        rtp_sock.close()
+        return
+
+    # 3. Parse & Draft
+    parsed = parse_inbound_email_dictation(transcript)
+    recip_query = parsed.get("recipient_name", "Samer")
+    target_email = resolve_contact_email(recip_query)
+    subject = parsed.get("subject", "Regarding our conversation")
+    drafted_body = parsed.get("drafted_body", "")
+    attach_resume = parsed.get("attach_resume", True)
+    spoken_confirmation = parsed.get("spoken_confirmation", "Should I send this email now, boss?")
+
+    # 4. Confirm with user
+    print(f"🗣️ TARS Inbound Confirming: '{spoken_confirmation}'")
+    confirm_q_ulaw = asyncio.run(generate_speech_ulaw(spoken_confirmation, rate=VOICE_RATE, pitch=VOICE_PITCH))
+    player.play(confirm_q_ulaw)
+    player.play(beep_ulaw)
+
+    confirm_pcm, confirm_dtmf = record_user_speech(rtp_sock, max_seconds=4.0, silence_timeout=0.6, player=player)
+    confirm_transcript = transcribe_pcm_audio(confirm_pcm) if len(confirm_pcm) >= 1500 else ""
+    user_confirmed = is_user_confirming_send(confirm_transcript, confirm_dtmf)
+    print(f"🗣️ BOSS CONFIRMATION: '{confirm_transcript}' | Decision: {user_confirmed}")
+
+    if user_confirmed:
+        player.play(ack_sending_ulaw)
+        import tars_agent
+        print(f"🚀 Sending outbound email to {target_email} (attach_resume={attach_resume})...")
+        res = tars_agent.tool_send_email(
+            to=target_email,
+            subject=subject,
+            body=drafted_body,
+            attach_resume=attach_resume
+        )
+        print(f"✅ Send Email Result: {res}")
+        player.play(farewell_ulaw)
+        send_telegram_summary(
+            transcript=transcript,
+            action_taken=f"Sent new email to {target_email}: '{subject}' (Resume attached: {attach_resume})",
+            sender="Mohammed Suhail (Inbound Call)",
+            subject=subject
+        )
+    else:
+        player.play(cancel_ulaw)
+
+    time.sleep(0.5)
+    _send_inbound_bye(sip_sock, contact_uri, local_ip, local_port, to_tag, from_tag, call_id, caller_ip, caller_port, routes)
+    rtp_sock.close()
+    print("📴 Inbound call ended cleanly.")
+
+
+def _send_inbound_bye(sip_sock, contact_uri, local_ip, local_port, to_tag, from_tag, call_id, caller_ip, caller_port, routes=None):
+    route_hdr = ""
+    if routes:
+        route_hdr = "Route: " + ", ".join(list(reversed(routes))) + "\r\n"
+    bye = (
+        f"BYE {contact_uri} SIP/2.0\r\n"
+        f"Via: SIP/2.0/UDP {local_ip}:{local_port};branch=z9hG4bK{uuid.uuid4().hex[:20]};rport\r\n"
+        + route_hdr +
+        f'From: <sip:{LINPHONE_USERNAME}@{LINPHONE_DOMAIN}>;tag={to_tag}\r\n'
+        f"To: <{contact_uri}>;tag={from_tag}\r\n"
+        f"Call-ID: {call_id}\r\n"
+        f"CSeq: 3 BYE\r\n"
+        "Max-Forwards: 70\r\n"
+        "Content-Length: 0\r\n\r\n"
+    )
+    try:
+        sip_sock.sendto(bye.encode(), (caller_ip, caller_port))
+    except Exception:
+        pass
+
+
+def run_inbound_sip_server(port=5060):
+    """
+    Persistent Linphone SIP Cloud & LAN Sentinel:
+    - Registers suhail_tars with sip.linphone.org on startup.
+    - Sends 280s keep-alive refresh so phone can call from anywhere (Wi-Fi or cellular).
+    - Accepts calls to suhail_tars, briefs Suhail, takes voice command, and sends email.
+    """
+    server = LINPHONE_DOMAIN
+    server_port = 5060
+    username = LINPHONE_USERNAME
+    password = LINPHONE_PASSWORD
+    public_ip = get_public_ip()
+    local_ip = get_local_ip()
+
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind(("0.0.0.0", port))
+        print(f"🎧 TARS Inbound SIP Server bound on {local_ip}:{port} (Public IP: {public_ip})")
+    except Exception as e:
+        print(f"⚠️ Could not bind inbound SIP listener on port {port}: {e}")
+        return
+
+    def _do_register():
+        try:
+            call_id = uuid.uuid4().hex + "@" + public_ip
+            from_tag = uuid.uuid4().hex[:8]
+            branch1 = "z9hG4bK" + uuid.uuid4().hex[:20]
+            reg1 = (
+                f"REGISTER sip:{server} SIP/2.0\r\n"
+                f"Via: SIP/2.0/UDP {public_ip}:{port};branch={branch1};rport\r\n"
+                f"From: <sip:{username}@{server}>;tag={from_tag}\r\n"
+                f"To: <sip:{username}@{server}>\r\n"
+                f"Call-ID: {call_id}\r\n"
+                f"CSeq: 1 REGISTER\r\n"
+                f"Contact: <sip:{username}@{public_ip}:{port};transport=UDP>;expires=600\r\n"
+                "Max-Forwards: 70\r\n"
+                f"User-Agent: {CALLER_DISPLAY}\r\n"
+                "Content-Length: 0\r\n\r\n"
+            )
+            sock.sendto(reg1.encode(), (server, server_port))
+
+            resp1 = None
+            start = time.time()
+            sock.settimeout(2.0)
+            while time.time() - start < 4.0:
+                try:
+                    data, _ = sock.recvfrom(4096)
+                    txt = data.decode("utf-8", errors="ignore")
+                    if "401" in txt or "407" in txt:
+                        resp1 = txt
+                        break
+                except socket.timeout:
+                    continue
+                except Exception:
+                    break
+
+            if resp1:
+                auth_header_name = "Proxy-Authenticate" if "407" in resp1 else "WWW-Authenticate"
+                auth_req_name = "Proxy-Authorization" if "407" in resp1 else "Authorization"
+                challenge = parse_auth_challenge(resp1, auth_header_name)
+                if challenge and challenge.get("nonce"):
+                    auth_val = compute_digest(
+                        username=username,
+                        password=password,
+                        realm=challenge["realm"],
+                        nonce=challenge["nonce"],
+                        method="REGISTER",
+                        uri=f"sip:{server}",
+                        qop=challenge["qop"],
+                        opaque=challenge["opaque"]
+                    )
+                    branch2 = "z9hG4bK" + uuid.uuid4().hex[:20]
+                    reg2 = (
+                        f"REGISTER sip:{server} SIP/2.0\r\n"
+                        f"Via: SIP/2.0/UDP {public_ip}:{port};branch={branch2};rport\r\n"
+                        f"From: <sip:{username}@{server}>;tag={from_tag}\r\n"
+                        f"To: <sip:{username}@{server}>\r\n"
+                        f"Call-ID: {call_id}\r\n"
+                        f"CSeq: 2 REGISTER\r\n"
+                        f"Contact: <sip:{username}@{public_ip}:{port};transport=UDP>;expires=600\r\n"
+                        f"{auth_req_name}: {auth_val}\r\n"
+                        "Max-Forwards: 70\r\n"
+                        f"User-Agent: {CALLER_DISPLAY}\r\n"
+                        "Content-Length: 0\r\n\r\n"
+                    )
+                    sock.sendto(reg2.encode(), (server, server_port))
+                    print(f"📡 Sent authenticated REGISTER for {username}@{server} on port {port}")
+        except Exception as reg_e:
+            print(f"⚠️ Registration error: {reg_e}")
+
+    # Initial register
+    _do_register()
+
+    # Registration refresh thread (every 280s)
+    def _reg_keeper():
+        while True:
+            time.sleep(280)
+            try:
+                print("🔄 Refreshing SIP registration with Linphone Flexisip...")
+                _do_register()
+            except Exception as re_err:
+                print(f"⚠️ Registration refresh error: {re_err}")
+
+    reg_thread = threading.Thread(target=_reg_keeper, daemon=True, name="SIP-Reg-Keeper")
+    reg_thread.start()
+
+    print(f"✅ TARS is officially registered as sip:{username}@{server} on port {port}!")
+    print(f"👉 You can now call '{username}' directly from your Linphone app anytime!\n")
+
+    sock.settimeout(None)
+    while True:
+        try:
+            data, addr = sock.recvfrom(4096)
+            msg = data.decode("utf-8", errors="ignore")
+            first_line = msg.splitlines()[0] if msg.splitlines() else ""
+
+            if first_line.startswith("INVITE"):
+                print(f"\n=======================================================")
+                print(f"📞 INBOUND CALL RECEIVED FROM {addr[0]}:{addr[1]}!")
+                print(f"=======================================================")
+                call_id_m = re.search(r'Call-ID:\s*([^\r\n]+)', msg, re.IGNORECASE)
+                call_id = call_id_m.group(1).strip() if call_id_m else ""
+                from_m = re.search(r'From:\s*([^\r\n]+)', msg, re.IGNORECASE)
+                from_hdr = from_m.group(1).strip() if from_m else ""
+                from_tag_m = re.search(r'tag=([^\r\n;]+)', from_hdr)
+                from_tag = from_tag_m.group(1) if from_tag_m else ""
+                to_m = re.search(r'To:\s*([^\r\n]+)', msg, re.IGNORECASE)
+                to_hdr = to_m.group(1).strip() if to_m else f"<sip:{username}@{server}>"
+                via_m = re.search(r'Via:\s*([^\r\n]+)', msg, re.IGNORECASE)
+                via_hdr = via_m.group(1).strip() if via_m else ""
+                cseq_m = re.search(r'CSeq:\s*([^\r\n]+)', msg, re.IGNORECASE)
+                cseq = cseq_m.group(1).strip() if cseq_m else "1 INVITE"
+                contact_m = re.search(r'Contact:\s*<([^>]+)>', msg, re.IGNORECASE)
+                contact_uri = contact_m.group(1).strip() if contact_m else f"sip:{username}@{server}"
+
+                record_routes = re.findall(r'Record-Route:\s*([^\r\n]+)', msg, re.IGNORECASE)
+                route_headers_str = "".join(f"Record-Route: {rr}\r\n" for rr in record_routes)
+
+                to_tag = uuid.uuid4().hex[:8]
+                final_to_hdr = to_hdr if "tag=" in to_hdr else f"{to_hdr};tag={to_tag}"
+
+                sdp_part = msg.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in msg else ""
+                destinations = select_best_rtp_destination(sdp_part)
+                if not destinations:
+                    destinations = [(addr[0], 7078)]
+
+                is_on_lan = any(ip.startswith(("192.168.", "10.", "172.")) for ip, _ in destinations)
+                advertised_ip = local_ip if is_on_lan else public_ip
+
+                rtp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                rtp_sock.bind(("0.0.0.0", 0))
+                local_rtp_port = rtp_sock.getsockname()[1]
+
+                sdp_answer = (
+                    "v=0\r\n"
+                    f"o=tars 123456 123456 IN IP4 {advertised_ip}\r\n"
+                    "s=TARS Sentinel\r\n"
+                    f"c=IN IP4 {advertised_ip}\r\n"
+                    "t=0 0\r\n"
+                    f"m=audio {local_rtp_port} RTP/AVP 0 8 101\r\n"
+                    "a=rtpmap:0 PCMU/8000\r\n"
+                    "a=rtpmap:8 PCMA/8000\r\n"
+                    "a=rtpmap:101 telephone-event/8000\r\n"
+                    f"a=candidate:1 1 UDP 2130706431 {local_ip} {local_rtp_port} typ host\r\n"
+                    f"a=candidate:2 1 UDP 1694498815 {public_ip} {local_rtp_port} typ srflx\r\n"
+                    "a=sendrecv\r\n"
+                )
+
+                resp_200 = (
+                    "SIP/2.0 200 OK\r\n"
+                    f"Via: {via_hdr}\r\n"
+                    f"From: {from_hdr}\r\n"
+                    f"To: {final_to_hdr}\r\n"
+                    f"Call-ID: {call_id}\r\n"
+                    f"CSeq: {cseq}\r\n"
+                    f"{route_headers_str}"
+                    f"Contact: <sip:{username}@{public_ip}:{port};transport=UDP>\r\n"
+                    "Content-Type: application/sdp\r\n"
+                    f"Content-Length: {len(sdp_answer)}\r\n\r\n"
+                    f"{sdp_answer}"
+                )
+
+                sock.sendto(b"SIP/2.0 100 Trying\r\n\r\n", addr)
+                sock.sendto(resp_200.encode(), addr)
+                print(f"🎉 Answered inbound call with 200 OK! RTP Audio port: {local_rtp_port}")
+
+                t = threading.Thread(
+                    target=handle_inbound_voice_session,
+                    args=(rtp_sock, destinations, call_id, from_tag, to_tag, contact_uri, addr[0], addr[1], sock, advertised_ip, port, record_routes),
+                    daemon=True,
+                    name="TARS-Inbound-Call"
+                )
+                t.start()
+
+            elif first_line.startswith("OPTIONS"):
+                resp_options = (
+                    "SIP/2.0 200 OK\r\n"
+                    + re.search(r'(Via:[^\r\n]+\r\n)', msg, re.IGNORECASE).group(1)
+                    + re.search(r'(From:[^\r\n]+\r\n)', msg, re.IGNORECASE).group(1)
+                    + re.search(r'(To:[^\r\n]+\r\n)', msg, re.IGNORECASE).group(1)
+                    + re.search(r'(Call-ID:[^\r\n]+\r\n)', msg, re.IGNORECASE).group(1)
+                    + re.search(r'(CSeq:[^\r\n]+\r\n)', msg, re.IGNORECASE).group(1)
+                    + "Allow: INVITE, ACK, CANCEL, BYE, OPTIONS\r\n"
+                    + "Content-Length: 0\r\n\r\n"
+                )
+                sock.sendto(resp_options.encode(), addr)
+
+            elif "200 Registration successful" in msg or "200 OK" in first_line:
+                if "REGISTER" in msg:
+                    print("✅ Linphone Registration Confirmed: 200 OK")
+
+            elif first_line.startswith("BYE"):
+                resp_bye = (
+                    "SIP/2.0 200 OK\r\n"
+                    + re.search(r'(Via:[^\r\n]+\r\n)', msg, re.IGNORECASE).group(1)
+                    + re.search(r'(From:[^\r\n]+\r\n)', msg, re.IGNORECASE).group(1)
+                    + re.search(r'(To:[^\r\n]+\r\n)', msg, re.IGNORECASE).group(1)
+                    + re.search(r'(Call-ID:[^\r\n]+\r\n)', msg, re.IGNORECASE).group(1)
+                    + re.search(r'(CSeq:[^\r\n]+\r\n)', msg, re.IGNORECASE).group(1)
+                    + "Content-Length: 0\r\n\r\n"
+                )
+                sock.sendto(resp_bye.encode(), addr)
+
+        except Exception as e:
+            time.sleep(0.05)
+
+
+def start_inbound_sip_listener_async(port=5060):
+    """Starts the inbound SIP listener in a daemon background thread."""
+    t = threading.Thread(target=run_inbound_sip_server, kwargs={"port": port}, daemon=True, name="TARS-Inbound-Listener")
+    t.start()
+    return t
+
+
+
 if __name__ == "__main__":
     trigger_urgent_call(
         subject="Meeting and Resume Request",
         sender="Mohammed Samer uddin ahmed <mdsameeruddintab.1@gmail.com>",
         reason="Samer requested your resume and a meeting regarding Data Science"
     )
+

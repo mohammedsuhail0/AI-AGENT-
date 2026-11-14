@@ -41,7 +41,9 @@ if os.path.exists(env_path):
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
-VOICE_NAME = os.environ.get("TARS_VOICE", "en-US-GuyNeural")  # Crisp, deep natural male voice
+VOICE_NAME = os.environ.get("TARS_VOICE", "en-GB-RyanNeural")  # Marvel's JARVIS (Paul Bettany British accent)
+VOICE_PITCH = "-2Hz"
+VOICE_RATE = "+4%"
 
 app = FastAPI(title="TARS Voice Sentinel API", version="1.0.0")
 
@@ -94,7 +96,7 @@ processed_email_ids = set()
 async def synthesize_speech_base64(text: str) -> str:
     """Generate MP3 audio via Edge-TTS and return as Base64 string."""
     try:
-        communicate = edge_tts.Communicate(text, VOICE_NAME)
+        communicate = edge_tts.Communicate(text, VOICE_NAME, pitch=VOICE_PITCH, rate=VOICE_RATE)
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
             tmp_path = tmp.name
         
@@ -193,7 +195,7 @@ async def websocket_call_endpoint(websocket: WebSocket):
             if msg_type == "CALL_ACCEPTED":
                 logger.info("🟢 User answered call on mobile! TARS speaking brief...")
                 email_data = msg.get("email_data") or active_call_context
-                script = email_data.get("voice_script", "Commander, an urgent email has arrived that needs your attention. How would you like me to respond?")
+                script = email_data.get("voice_script", "Hello boss, an urgent email has arrived that needs your attention. How would you like me to respond?")
                 
                 audio_b64 = await synthesize_speech_base64(script)
                 await websocket.send_json({
@@ -210,7 +212,7 @@ async def websocket_call_endpoint(websocket: WebSocket):
                         # Check for hangup intents
                         lower_text = user_text.lower()
                         if any(phrase in lower_text for phrase in ["bye", "goodbye", "hang up", "that's it", "that is all", "no thanks", "nothing else"]):
-                            farewell = "Understood. Hanging up now, Commander."
+                            farewell = "Understood. Hanging up now, boss."
                             farewell_b64 = await synthesize_speech_base64(farewell)
                             await websocket.send_json({
                                 "type": "AUDIO_RESPONSE",
@@ -268,7 +270,7 @@ async def background_gmail_watcher():
     try:
         init_service = check_emails.get_gmail_service()
         if init_service:
-            existing_res = init_service.users().messages().list(userId='me', q='label:INBOX', maxResults=15).execute()
+            existing_res = init_service.users().messages().list(userId='me', q='label:INBOX', maxResults=30).execute()
             for m in existing_res.get('messages', []):
                 processed_email_ids.add(m['id'])
             logger.info(f"Initialized inbox baseline. Existing messages indexed: {len(processed_email_ids)}")
@@ -336,12 +338,13 @@ Respond ONLY with valid JSON:
                             if not analysis:
                                 analysis = {"is_urgent": False, "reason": "Classification failed"}
                             is_urgent = analysis.get("is_urgent", False)
-                            # Safeguard: if someone asks for resume, interview, meeting, shortlist, or direct inquiry
+                            # Safeguard: if someone asks for resume, interview, meeting, shortlist, or direct inquiry from contacts like Samer
                             body_lower = body.lower()
-                            if any(k in body_lower for k in ["resume", "interview", "meeting", "shortlist", "hackathon", "urgent", "schedule", "data science"]):
+                            sender_lower = sender.lower()
+                            if any(k in body_lower for k in ["resume", "interview", "meeting", "shortlist", "hackathon", "urgent", "schedule", "data science"]) or any(k in sender_lower for k in ["samer", "sameer", "mdsameeruddintab"]):
                                 is_urgent = True
-                                logger.info("⚡ Safeguard triggered: Personal opportunity/resume request -> is_urgent=True")
-                            voice_script = analysis.get("voice_script", f"Suhail sir, urgent email from {sender} regarding {subject}.")
+                                logger.info("⚡ Safeguard triggered: Priority opportunity or VIP contact -> is_urgent=True")
+                            voice_script = analysis.get("voice_script", f"Hello boss, we got an email from {sender} regarding {subject}.")
 
                             logger.info(f"Email Analysis for '{subject}': is_urgent={is_urgent} ({analysis.get('reason')})")
 
@@ -385,8 +388,14 @@ Respond ONLY with valid JSON:
 
 @app.on_event("startup")
 async def startup_event():
-    """Launches the background Gmail watcher when the server starts."""
+    """Launches the background Gmail watcher and inbound SIP listener when the server starts."""
     asyncio.create_task(background_gmail_watcher())
+    try:
+        import sip_caller
+        sip_caller.start_inbound_sip_listener_async(port=5060)
+        logger.info("🎧 Inbound SIP Listener started on port 5060 (Ready for calls from Linphone)")
+    except Exception as err:
+        logger.warning(f"Inbound SIP listener start warning: {err}")
 
 
 def get_local_ip() -> str:
