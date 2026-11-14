@@ -5,16 +5,17 @@ def print(*args, **kwargs):
     return _orig_print(*args, **kwargs)
 
 """
-TARS Voice Sentinel - Autonomous Interactive SIP Agent (100% Free Forever)
+TARS Voice Sentinel - Conversational Interactive SIP Agent (100% Free Forever)
 Direct VoIP Push Calling to Android via Linphone SIP (RFC 2617 Digest Auth).
+
 Features:
-- Native Android Lockscreen Wakeup via FCM Push.
-- Natural Voice Briefing via Edge-TTS (Jarvis / TARS Persona).
-- 2-Way Microphone Audio Capture over RTP (PCMU/PCMA) & RFC 2833 DTMF.
-- Sub-300ms Speech Transcription via Groq Whisper (whisper-large-v3-turbo).
-- Fast Intent Classification via Groq LLM (qwen/qwen3.8-27b / openai/gpt-oss-20b).
+- Multi-Turn Interactive Conversation (Jarvis Persona).
+- Spoken Confirmation Loop: Repeats back what you said and verifies before sending.
+- Zero Dead Silence: Instant audio acknowledgements while processing.
+- Clean Studio Voice: Uses en-US-AndrewMultilingualNeural, filtered single-port RTP (no duplicates/comb-filtering).
+- Accurate Groq Whisper Transcription: Domain vocabulary prompting prevents phonetic errors.
 - Autonomous Gmail API Reply & Resume Attachment Dispatch.
-- Instant Verbal Confirmation Spoken Over the Phone before Hangup.
+- RFC 2833 DTMF Support: Press 1 on phone keypad to confirm instantly.
 """
 
 import sys
@@ -36,6 +37,7 @@ import threading
 import asyncio
 import math
 import wave
+import json
 import requests
 import edge_tts
 import miniaudio
@@ -63,6 +65,8 @@ groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+
+VOICE_MODEL = "en-US-AndrewMultilingualNeural"  # Warm, crisp, human conversational AI voice
 
 
 def get_local_ip() -> str:
@@ -133,9 +137,9 @@ def make_rtp_packet(seq, timestamp, ssrc, payload, marker=False, pt=0):
 
 
 async def generate_speech_ulaw(text: str) -> bytes:
-    """Synthesizes high-fidelity speech using Edge-TTS and converts to 8kHz G.711 u-law."""
+    """Synthesizes high-fidelity speech using Edge-TTS and converts cleanly to 8kHz G.711 u-law."""
     try:
-        comm = edge_tts.Communicate(text, "en-US-GuyNeural")
+        comm = edge_tts.Communicate(text, VOICE_MODEL)
         chunks = [c["data"] async for c in comm.stream() if c["type"] == "audio"]
         mp3_data = b"".join(chunks)
         decoded = miniaudio.decode(mp3_data, nchannels=1, sample_rate=8000)
@@ -146,17 +150,17 @@ async def generate_speech_ulaw(text: str) -> bytes:
         return b"\xff" * 16000
 
 
-def generate_beep_ulaw(freq=800, duration_sec=0.25) -> bytes:
-    """Generates an intercom prompt beep in u-law to signal user when TARS is listening."""
+def generate_beep_ulaw(freq=800, duration_sec=0.20) -> bytes:
+    """Generates a pleasant intercom prompt beep in u-law to signal user when TARS is listening."""
     pcm = bytearray()
     for i in range(int(8000 * duration_sec)):
-        val = int(14000 * math.sin(2 * math.pi * freq * i / 8000))
+        val = int(12000 * math.sin(2 * math.pi * freq * i / 8000))
         pcm.extend(struct.pack("<h", val))
     return audioop.lin2ulaw(bytes(pcm), 2)
 
 
 def stream_audio(rtp_sock, destinations, ulaw_data, repeat=1, ssrc=0x34A8129B):
-    """Streams audio packets simultaneously to all parsed RTP candidate destinations."""
+    """Streams audio packets smoothly with strict 20ms cadence to the target destination."""
     chunk_size = 160
     seq = 1
     timestamp = 0
@@ -193,32 +197,38 @@ def stream_audio(rtp_sock, destinations, ulaw_data, repeat=1, ssrc=0x34A8129B):
             if sleep_dur > 0:
                 time.sleep(sleep_dur)
         if r < repeat - 1:
-            time.sleep(0.3)
+            time.sleep(0.2)
 
 
-def parse_sdp(sdp_text):
-    """Parses SDP to extract both primary media address and all ICE candidate addresses."""
-    destinations = []
-    primary_ip = None
-    ip_m = re.search(r'c=IN\s+(?:IP4|IP6)\s+([^\r\n;]+)', sdp_text)
-    if ip_m:
-        primary_ip = ip_m.group(1).strip()
+def select_best_rtp_destination(sdp_text: str) -> list[tuple[str, int]]:
+    """
+    Parses SDP to extract ONLY component 1 (RTP audio, ignoring component 2 RTCP).
+    Selects the single best destination to avoid packet duplication, jitter drops, and comb filtering.
+    """
+    # 1. Match ONLY component 1 (RTP audio)
+    cand_matches = re.findall(r'a=candidate:\S+\s+1\s+(?:UDP|udp)\s+\d+\s+([^\s]+)\s+(\d+)', sdp_text)
+    destinations = [(ip.strip(), int(port)) for ip, port in cand_matches]
 
-    primary_port = None
-    port_m = re.search(r'm=audio\s+(\d+)', sdp_text)
-    if port_m:
-        primary_port = int(port_m.group(1))
-
-    if primary_ip and primary_port:
-        destinations.append((primary_ip, primary_port))
-
-    cand_matches = re.findall(r'a=candidate:\S+\s+\d+\s+(?:UDP|udp)\s+\d+\s+([^\s]+)\s+(\d+)', sdp_text)
-    for c_ip, c_port in cand_matches:
-        pair = (c_ip.strip(), int(c_port))
+    # Primary c= and m= line
+    c_ip = re.search(r'c=IN\s+(?:IP4|IP6)\s+([^\r\n;]+)', sdp_text)
+    m_port = re.search(r'm=audio\s+(\d+)', sdp_text)
+    if c_ip and m_port:
+        pair = (c_ip.group(1).strip(), int(m_port.group(1)))
         if pair not in destinations:
-            destinations.append(pair)
+            destinations.insert(0, pair)
 
-    return destinations
+    # If the phone is on the same local Wi-Fi, select ONLY the local LAN destination
+    lan_dests = [d for d in destinations if d[0].startswith(("192.168.", "10.", "172."))]
+    if lan_dests:
+        print(f"🎯 Selected single Wi-Fi RTP endpoint: {lan_dests[0]} (Zero packet duplication, no comb filtering)")
+        return [lan_dests[0]]
+
+    # If on cellular / outside, select the public reflexive or primary endpoint
+    if destinations:
+        print(f"🎯 Selected single WAN RTP endpoint: {destinations[0]}")
+        return [destinations[0]]
+        
+    return []
 
 
 def pcm_to_wav_bytes(pcm_data: bytes, sample_rate: int = 8000) -> bytes:
@@ -233,15 +243,18 @@ def pcm_to_wav_bytes(pcm_data: bytes, sample_rate: int = 8000) -> bytes:
 
 
 def transcribe_pcm_audio(pcm_data: bytes) -> str:
-    """Transcribes user voice audio using Groq Whisper API (<300ms)."""
+    """Transcribes user voice audio using Groq Whisper API (<300ms) with domain vocabulary prompt."""
     if not groq_client or len(pcm_data) < 3000:
         return ""
     try:
         wav_bytes = pcm_to_wav_bytes(pcm_data)
+        # Passing domain vocabulary in prompt prevents phonetic mistakes like "deploy" vs "available"
+        vocab_prompt = "Mohammed Suhail, available, meet on Sunday, interview, hackathon, resume, confirm, schedule, email reply, C3 club."
         transcription = groq_client.audio.transcriptions.create(
             model="whisper-large-v3-turbo",
             file=("speech.wav", wav_bytes),
             language="en",
+            prompt=vocab_prompt,
             response_format="text"
         )
         text = transcription.strip() if isinstance(transcription, str) else getattr(transcription, "text", "").strip()
@@ -252,41 +265,43 @@ def transcribe_pcm_audio(pcm_data: bytes) -> str:
         return ""
 
 
-def classify_user_command(transcript: str, email_subject: str, email_sender: str, email_body: str) -> dict:
-    """Classifies user voice command using Groq LLM with fallback heuristics."""
+def parse_user_intent_and_draft(transcript: str, email_subject: str, email_sender: str, email_body: str) -> dict:
+    """
+    Parses user instructions into structured actions and creates a conversational confirmation question.
+    """
     clean_t = transcript.lower().strip()
-    words = clean_t.split()
     
-    # If transcript has more than 2 words or contains custom instructions, prioritize Groq LLM
-    is_complex_or_custom = len(words) > 2 or any(cue in clean_t for cue in [
-        "reply with", "tell them", "say that", "write that", "meet", "schedule", "tomorrow", "sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"
-    ])
+    # Fast check for simple cancellation
+    if any(neg in clean_t for neg in ["cancel", "no don't send", "dont send", "stop", "ignore", "decline"]):
+        return {
+            "intent": "CANCEL",
+            "instruction": "",
+            "attach_resume": False,
+            "spoken_confirmation": "Understood Commander. Email canceled. I'll keep the draft in Telegram. Standing by."
+        }
 
-    if groq_client and (is_complex_or_custom or len(words) >= 2):
+    if groq_client:
         prompt = f"""You are TARS, executive voice AI assistant on a live phone call with Mohammed Suhail.
-The user just received this urgent email:
+Urgent incoming email received:
 From: {email_sender}
 Subject: {email_subject}
-Content: {email_body[:1000]}
+Content: {email_body[:800]}
 
-TARS asked: "Would you like me to send your resume and confirm, or what should I reply?"
-The user responded on the phone call with this spoken voice command:
+The user spoke this instruction into the phone call:
 "{transcript}"
 
-Determine user intent and action:
-1. "CONFIRM_SEND": User wants to confirm with standard confirmation, said okay/yes/send/sure/go ahead.
-2. "CUSTOM_REPLY": User gave a specific customized reply message or time/date (e.g. "tell them I will meet on Sunday", "reply with X").
-3. "CANCEL": User said no/cancel/ignore/decline.
-4. "UNCLEAR": Inaudible, silent, or unrelated.
-
-If CUSTOM_REPLY, synthesize the user's exact instructions into 'instruction' (e.g., "Confirm meeting and inform that Mohammed is available to meet on Sunday, attach resume").
+Analyze what the user specifically commanded:
+1. Did the user specify a date, day, time, or message? (e.g. "I will meet on Sunday", "Available Monday 4pm").
+2. Does the user want to attach their resume? (Default True for opportunities/meeting requests unless explicitly told not to).
+3. Generate 'instruction' for the email drafting agent containing ALL specific details given by the user.
+4. Generate 'spoken_confirmation': A crisp, friendly 1-sentence question TARS speaks to Suhail to confirm what he understood before sending (e.g. "Got it Commander. I'll tell Samer you're available to meet this Sunday, and attach your resume. Should I send this now?").
 
 Respond ONLY with valid JSON:
 {{
-  "intent": "CONFIRM_SEND" | "CUSTOM_REPLY" | "CANCEL" | "UNCLEAR",
-  "instruction": "Instruction for drafting reply",
+  "intent": "CUSTOM_REPLY" | "CONFIRM_SEND" | "CANCEL",
+  "instruction": "Explicit instructions containing any days/times/messages dictated by user",
   "attach_resume": true or false,
-  "voice_response": "One crisp, direct sentence TARS speaks back on phone confirming action taken."
+  "spoken_confirmation": "Got it Commander. I'll reply saying [summary of message], with your resume attached. Shall I send it now?"
 }}"""
         for model in ["qwen/qwen3.8-27b", "openai/gpt-oss-20b", "openai/gpt-oss-120b"]:
             try:
@@ -295,46 +310,40 @@ Respond ONLY with valid JSON:
                     messages=[{"role": "user", "content": prompt}],
                     response_format={"type": "json_object"}
                 )
-                import json
                 data = json.loads(resp.choices[0].message.content)
                 if data and "intent" in data:
                     return data
             except Exception as e:
                 continue
 
-    # Fast path keyword heuristics for simple 1-2 word confirmations
-    positive_cues = ["ok", "okay", "send", "yes", "yeah", "yep", "sure", "confirm", "go ahead", "do it", "dispatch"]
-    cancel_cues = ["no", "nope", "cancel", "stop", "ignore", "don't", "dont", "decline"]
-    
-    if any(cue in clean_t for cue in positive_cues) and not any(neg in clean_t for neg in cancel_cues):
-        return {
-            "intent": "CONFIRM_SEND",
-            "instruction": "Confirm enthusiastically and attach resume.",
-            "attach_resume": True,
-            "voice_response": "Affirmative, Commander. Your reply has been sent and your resume is attached. Have a great day!"
-        }
-    
-    if any(cue in clean_t for cue in cancel_cues):
-        return {
-            "intent": "CANCEL",
-            "instruction": "",
-            "attach_resume": False,
-            "voice_response": "Understood Commander. No email sent. Standing by."
-        }
-
+    # Fallback default confirmation
     return {
-        "intent": "UNCLEAR",
-        "instruction": "Confirm enthusiastically and attach resume.",
+        "intent": "CONFIRM_SEND",
+        "instruction": f"Confirm meeting and reply: '{transcript}'. Attach resume.",
         "attach_resume": True,
-        "voice_response": "I couldn't hear your instruction Commander. The draft is saved in your Telegram bot. Standing by."
+        "spoken_confirmation": f"Got it Commander. I'll reply with your instructions and attach your resume. Should I send this now?"
     }
 
 
-def record_user_speech(rtp_sock, max_seconds=7.0, silence_timeout=1.5) -> tuple[bytes, str]:
+def is_user_confirming_send(transcript: str, dtmf: str = None) -> bool:
+    """Checks if the user confirmed dispatching the email (or pressed 1)."""
+    if dtmf == "1":
+        return True
+    if dtmf == "2":
+        return False
+    clean_t = transcript.lower().strip()
+    positive = ["yes", "yeah", "yep", "send", "send it", "go ahead", "okay", "ok", "confirm", "do it", "sure", "dispatch"]
+    negative = ["no", "wait", "cancel", "don't", "dont", "stop", "change", "hold"]
+    if any(p in clean_t for p in positive) and not any(n in clean_t for n in negative):
+        return True
+    return False
+
+
+def record_user_speech(rtp_sock, max_seconds=7.0, silence_timeout=1.2) -> tuple[bytes, str]:
     """
     Records incoming RTP audio packets from the user's phone microphone.
     Handles PCMU (PT=0), PCMA (PT=8), and RFC 2833 DTMF events (PT=101).
-    Uses RMS volume Voice Activity Detection (VAD) to auto-stop on silence.
+    Uses RMS volume Voice Activity Detection (VAD) to auto-stop promptly on silence.
     Returns (linear_pcm_bytes, dtmf_digit).
     """
     print(f"👂 [TARS Intercom Active] Listening for voice command over phone mic (Max {max_seconds}s)...")
@@ -405,13 +414,13 @@ def record_user_speech(rtp_sock, max_seconds=7.0, silence_timeout=1.5) -> tuple[
                     last_speech_time = time.time()
                 
                 # If speech was detected and user paused for silence_timeout
-                if speech_detected and (time.time() - last_speech_time > silence_timeout) and len(frames) > 25:
+                if speech_detected and (time.time() - last_speech_time > silence_timeout) and len(frames) > 20:
                     print("🤫 Silence detected after speech. Finished listening.")
                     break
 
         except socket.timeout:
             continue
-        except Exception as e:
+        except Exception:
             continue
             
     pcm_bytes = b"".join(frames)
@@ -448,12 +457,10 @@ def trigger_urgent_call(
 ) -> bool:
     """
     Autonomous Interactive Jarvis Voice Sentinel:
-    1. Rings Mohammed's Android phone via Linphone push calling (FCM push on lockscreen).
-    2. Speaks natural Jarvis-style briefing when answered.
-    3. Emits prompt chime and listens to phone microphone.
-    4. Transcribes spoken instructions with Groq Whisper.
-    5. Dispatches email reply & resume attachment via Gmail API if confirmed.
-    6. Speaks verbal confirmation before cleanly disconnecting.
+    - Rings Mohammed's Android phone via Linphone push calling (FCM push on lockscreen).
+    - Multi-turn conversational interaction with spoken confirmation before sending.
+    - Zero dead silence with immediate audio acknowledgements.
+    - Studio-grade single-destination RTP streaming.
     """
     server = LINPHONE_DOMAIN
     server_port = 5060
@@ -478,19 +485,21 @@ def trigger_urgent_call(
         briefing_text += f"{clean_reason}. "
     else:
         briefing_text += f"Regarding {clean_subject}. "
-    briefing_text += "Would you like me to send your resume and confirm, or what should I reply?"
+    briefing_text += "What would you like me to tell them?"
 
     print(f"\n=======================================================")
-    print(f"🚨 TARS SENTINEL - TRIGGERING AUTONOMOUS CALL")
+    print(f"🚨 TARS SENTINEL - TRIGGERING CONVERSATIONAL CALL")
     print(f"Target: {target_sip_uri}")
     print(f"Sender: {clean_sender}")
     print(f"Subject: {clean_subject}")
     print(f"=======================================================")
 
-    print("⚙️ Synthesizing briefing voice with Edge-TTS...")
+    print("⚙️ Synthesizing conversational speech assets...")
     greeting_ulaw = asyncio.run(generate_speech_ulaw(briefing_text))
-    beep_ulaw = generate_beep_ulaw(freq=800, duration_sec=0.25)
-    print(f"✅ Voice audio prepared ({len(greeting_ulaw)/8000:.1f}s).")
+    beep_ulaw = generate_beep_ulaw(freq=800, duration_sec=0.20)
+    ack_drafting_ulaw = asyncio.run(generate_speech_ulaw("Understood Commander, drafting that now."))
+    ack_sending_ulaw = asyncio.run(generate_speech_ulaw("Sending that right away, Commander."))
+    print(f"✅ Conversational audio prepared ({len(greeting_ulaw)/8000:.1f}s).")
 
     sip_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sip_sock.settimeout(2.0)
@@ -631,10 +640,11 @@ def trigger_urgent_call(
             continue
 
     if call_answered:
-        destinations = parse_sdp(callee_sdp)
-        print(f"Discovered RTP destinations ({len(destinations)}): {destinations}")
+        # Select single pristine RTP destination (no duplicate packets, no RTCP collision)
+        destinations = select_best_rtp_destination(callee_sdp)
+        print(f"Target RTP Audio Destination: {destinations}")
 
-        # Adaptive SDP media address: Use local LAN IP if phone is on Wi-Fi
+        # Adaptive SDP media address
         is_on_lan = any(ip.startswith(("192.168.", "10.", "172.")) for ip, _ in destinations)
         advertised_ip = local_ip if is_on_lan else public_ip
 
@@ -683,63 +693,102 @@ def trigger_urgent_call(
                 except Exception:
                     pass
 
-        # 1. TARS Speaks the Briefing
+        # -------------------------------------------------------------
+        # CONVERSATIONAL TURN 1: TARS GREETING & BRIEFING
+        # -------------------------------------------------------------
         if destinations:
-            print("🗣️ TARS is speaking email summary into call...")
+            print("🗣️ TARS Speaking Initial Briefing...")
             stream_audio(rtp_sock, destinations, greeting_ulaw, repeat=1)
-            time.sleep(0.2)
-            # 2. Play prompt chime to signal listening mode
+            time.sleep(0.1)
             stream_audio(rtp_sock, destinations, beep_ulaw, repeat=1)
 
-        # 3. TARS Listens to Phone Microphone
-        user_pcm, dtmf_digit = record_user_speech(rtp_sock, max_seconds=7.0, silence_timeout=1.5)
+        # -------------------------------------------------------------
+        # CONVERSATIONAL TURN 2: USER DICTATES INSTRUCTIONS
+        # -------------------------------------------------------------
+        user_pcm, dtmf_digit = record_user_speech(rtp_sock, max_seconds=7.0, silence_timeout=1.2)
 
-        # 4. Process Voice Command or DTMF
+        # IMMEDIATE FEEDBACK TO ELIMINATE DEAD SILENCE
+        if destinations:
+            stream_audio(rtp_sock, destinations, ack_drafting_ulaw, repeat=1)
+
         transcript = ""
         if dtmf_digit == "1":
-            transcript = "Yes, send it"
+            transcript = "Confirm and send resume"
         elif dtmf_digit == "2":
-            transcript = "No, cancel"
+            transcript = "Cancel, don't send"
         elif len(user_pcm) >= 3000:
             transcript = transcribe_pcm_audio(user_pcm)
 
         print(f"\n=======================================================")
-        print(f"🗣️ COMMAND RECEIVED: '{transcript}'")
+        print(f"🗣️ USER INSTRUCTION RECEIVED: '{transcript}'")
         print(f"=======================================================")
 
-        analysis = classify_user_command(
-            transcript=transcript,
+        analysis = parse_user_intent_and_draft(
+            transcript=transcript or "Confirm and send resume",
             email_subject=clean_subject,
             email_sender=clean_sender,
             email_body=clean_reason or body
         )
-        intent = analysis.get("intent", "UNCLEAR")
-        voice_response = analysis.get("voice_response", "Standing by Commander.")
+        intent = analysis.get("intent", "CUSTOM_REPLY")
+        instruction = analysis.get("instruction", f"Confirm enthusiastically: {transcript}. Attach resume.")
         attach_resume = analysis.get("attach_resume", True)
-        instruction = analysis.get("instruction", "Confirm enthusiastically and attach resume.")
+        spoken_confirmation = analysis.get("spoken_confirmation", "I have prepared your reply. Shall I send it now?")
 
-        action_summary = "No action taken"
-
-        # 5. Execute Autonomous Actions via TARS Agent & Gmail API
-        if intent in ("CONFIRM_SEND", "CUSTOM_REPLY"):
-            import tars_agent
-            if email_id:
-                print(f"🚀 Executing Gmail reply for email {email_id} (attach_resume={attach_resume})...")
-                res = tars_agent.tool_reply_to_emails(
-                    email_ids=[email_id],
-                    instruction=instruction,
-                    attach_resume=attach_resume,
-                    send_immediately=True
-                )
-                print(f"✅ Gmail Action Result: {res}")
-                action_summary = f"Replied to email via Gmail API (Resume attached: {attach_resume})"
-            else:
-                print("⚡ Simulation / Test mode: Verified action execution without email_id.")
-                action_summary = f"Simulated confirmation for '{clean_subject}' (Resume attached: {attach_resume})"
-        elif intent == "CANCEL":
+        # -------------------------------------------------------------
+        # CONVERSATIONAL TURN 3: TARS ASKS FOR CONFIRMATION (NO MISTAKES)
+        # -------------------------------------------------------------
+        if intent == "CANCEL":
+            cancel_audio = asyncio.run(generate_speech_ulaw("Understood Commander. Email canceled. Standing by."))
+            if destinations:
+                stream_audio(rtp_sock, destinations, cancel_audio, repeat=1)
             action_summary = "Email canceled as requested"
         else:
-            action_summary = "Draft stored in Telegram for manual tap approval"
+            print(f"🗣️ TARS Confirming with User: '{spoken_confirmation}'")
+            confirm_q_ulaw = asyncio.run(generate_speech_ulaw(spoken_confirmation))
+            if destinations:
+                stream_audio(rtp_sock, destinations, confirm_q_ulaw, repeat=1)
+                time.sleep(0.1)
+                stream_audio(rtp_sock, destinations, beep_ulaw, repeat=1)
+
+            # Listen for User's "Yes / Send it"
+            confirm_pcm, confirm_dtmf = record_user_speech(rtp_sock, max_seconds=5.0, silence_timeout=1.2)
+            confirm_transcript = transcribe_pcm_audio(confirm_pcm) if len(confirm_pcm) >= 2000 else ""
+            user_confirmed = is_user_confirming_send(confirm_transcript, confirm_dtmf)
+
+            print(f"🗣️ USER CONFIRMATION: '{confirm_transcript}' | DTMF: {confirm_dtmf} | Decision: {user_confirmed}")
+
+            # -------------------------------------------------------------
+            # CONVERSATIONAL TURN 4: EXECUTE DISPATCH & SAY FAREWELL
+            # -------------------------------------------------------------
+            if user_confirmed:
+                if destinations:
+                    stream_audio(rtp_sock, destinations, ack_sending_ulaw, repeat=1)
+
+                import tars_agent
+                if email_id:
+                    print(f"🚀 Executing Gmail reply with exact instruction: '{instruction}' (attach_resume={attach_resume})...")
+                    res = tars_agent.tool_reply_to_emails(
+                        email_ids=[email_id],
+                        instruction=instruction,
+                        attach_resume=attach_resume,
+                        send_immediately=True
+                    )
+                    print(f"✅ Gmail Action Result: {res}")
+                    action_summary = f"Replied to email via Gmail API: '{instruction}' (Resume attached: {attach_resume})"
+                else:
+                    print("⚡ Test mode: Verified action execution without email_id.")
+                    action_summary = f"Simulated dispatch for '{clean_subject}' with instruction: '{instruction}'"
+
+                farewell_text = f"Affirmative Commander. Your reply has been dispatched to {clean_sender} with your resume attached. Have a great day!"
+                farewell_ulaw = asyncio.run(generate_speech_ulaw(farewell_text))
+                if destinations:
+                    stream_audio(rtp_sock, destinations, farewell_ulaw, repeat=1)
+            else:
+                farewell_text = "Understood Commander. I've held the email. The draft is waiting in your Telegram bot. Standing by."
+                farewell_ulaw = asyncio.run(generate_speech_ulaw(farewell_text))
+                if destinations:
+                    stream_audio(rtp_sock, destinations, farewell_ulaw, repeat=1)
+                action_summary = "Held for manual review in Telegram bot"
 
         # Send Telegram report
         send_telegram_summary(
@@ -749,15 +798,11 @@ def trigger_urgent_call(
             subject=clean_subject
         )
 
-        # 6. TARS Speaks Verbal Confirmation to User
-        print(f"🗣️ TARS Speaking Verbal Confirmation: '{voice_response}'")
-        confirm_ulaw = asyncio.run(generate_speech_ulaw(voice_response))
-        if destinations:
-            stream_audio(rtp_sock, destinations, confirm_ulaw, repeat=1)
-
         time.sleep(1.0)
 
-        # 7. Hangup Cleanly (SIP BYE)
+        # -------------------------------------------------------------
+        # CLEAN DISCONNECT (SIP BYE)
+        # -------------------------------------------------------------
         bye = (
             f"BYE {target_sip_uri} SIP/2.0\r\n"
             f"Via: SIP/2.0/UDP {public_ip}:{local_sip_port};branch=z9hG4bK{uuid.uuid4().hex[:20]};rport\r\n"
