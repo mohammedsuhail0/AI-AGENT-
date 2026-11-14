@@ -31,6 +31,7 @@ import io
 import socket
 import uuid
 import hashlib
+import random
 import re
 import time
 import struct
