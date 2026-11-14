@@ -341,7 +341,7 @@ Respond ONLY with valid JSON:
                             if any(k in body_lower for k in ["resume", "interview", "meeting", "shortlist", "hackathon", "urgent", "schedule", "data science"]):
                                 is_urgent = True
                                 logger.info("⚡ Safeguard triggered: Personal opportunity/resume request -> is_urgent=True")
-                            voice_script = analysis.get("voice_script", f"Commander, urgent email from {sender} regarding {subject}.")
+                            voice_script = analysis.get("voice_script", f"Suhail sir, urgent email from {sender} regarding {subject}.")
 
                             logger.info(f"Email Analysis for '{subject}': is_urgent={is_urgent} ({analysis.get('reason')})")
 
