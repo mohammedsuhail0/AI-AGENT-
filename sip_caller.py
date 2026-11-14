@@ -1285,8 +1285,8 @@ def run_inbound_sip_server(port=5060):
                 from_tag = from_tag_m.group(1) if from_tag_m else ""
                 to_m = re.search(r'To:\s*([^\r\n]+)', msg, re.IGNORECASE)
                 to_hdr = to_m.group(1).strip() if to_m else f"<sip:{username}@{server}>"
-                via_m = re.search(r'Via:\s*([^\r\n]+)', msg, re.IGNORECASE)
-                via_hdr = via_m.group(1).strip() if via_m else ""
+                via_lines = re.findall(r'(Via:\s*[^\r\n]+)', msg, re.IGNORECASE)
+                via_headers_str = "".join(f"{vl.strip()}\r\n" for vl in via_lines)
                 cseq_m = re.search(r'CSeq:\s*([^\r\n]+)', msg, re.IGNORECASE)
                 cseq = cseq_m.group(1).strip() if cseq_m else "1 INVITE"
                 contact_m = re.search(r'Contact:\s*<([^>]+)>', msg, re.IGNORECASE)
@@ -1297,6 +1297,18 @@ def run_inbound_sip_server(port=5060):
 
                 to_tag = uuid.uuid4().hex[:8]
                 final_to_hdr = to_hdr if "tag=" in to_hdr else f"{to_hdr};tag={to_tag}"
+
+                # Send standard-compliant 100 Trying immediately
+                resp_100 = (
+                    "SIP/2.0 100 Trying\r\n"
+                    f"{via_headers_str}"
+                    f"From: {from_hdr}\r\n"
+                    f"To: {to_hdr}\r\n"
+                    f"Call-ID: {call_id}\r\n"
+                    f"CSeq: {cseq}\r\n"
+                    "Content-Length: 0\r\n\r\n"
+                )
+                sock.sendto(resp_100.encode(), addr)
 
                 sdp_part = msg.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in msg else ""
                 destinations = select_best_rtp_destination(sdp_part)
@@ -1327,21 +1339,22 @@ def run_inbound_sip_server(port=5060):
 
                 resp_200 = (
                     "SIP/2.0 200 OK\r\n"
-                    f"Via: {via_hdr}\r\n"
+                    f"{via_headers_str}"
                     f"From: {from_hdr}\r\n"
                     f"To: {final_to_hdr}\r\n"
                     f"Call-ID: {call_id}\r\n"
                     f"CSeq: {cseq}\r\n"
                     f"{route_headers_str}"
                     f"Contact: <sip:{username}@{public_ip}:{port};transport=UDP>\r\n"
+                    f"User-Agent: {CALLER_DISPLAY}\r\n"
                     "Content-Type: application/sdp\r\n"
                     f"Content-Length: {len(sdp_answer)}\r\n\r\n"
                     f"{sdp_answer}"
                 )
 
-                sock.sendto(b"SIP/2.0 100 Trying\r\n\r\n", addr)
                 sock.sendto(resp_200.encode(), addr)
                 print(f"🎉 Answered inbound call with 200 OK! RTP Audio port: {local_rtp_port}")
+
 
                 t = threading.Thread(
                     target=handle_inbound_voice_session,
@@ -1352,13 +1365,19 @@ def run_inbound_sip_server(port=5060):
                 t.start()
 
             elif first_line.startswith("OPTIONS"):
+                via_lines = re.findall(r'(Via:\s*[^\r\n]+)', msg, re.IGNORECASE)
+                v_str = "".join(f"{vl.strip()}\r\n" for vl in via_lines)
+                f_m = re.search(r'(From:\s*[^\r\n]+)', msg, re.IGNORECASE)
+                t_m = re.search(r'(To:\s*[^\r\n]+)', msg, re.IGNORECASE)
+                c_m = re.search(r'(Call-ID:\s*[^\r\n]+)', msg, re.IGNORECASE)
+                cs_m = re.search(r'(CSeq:\s*[^\r\n]+)', msg, re.IGNORECASE)
                 resp_options = (
                     "SIP/2.0 200 OK\r\n"
-                    + re.search(r'(Via:[^\r\n]+\r\n)', msg, re.IGNORECASE).group(1)
-                    + re.search(r'(From:[^\r\n]+\r\n)', msg, re.IGNORECASE).group(1)
-                    + re.search(r'(To:[^\r\n]+\r\n)', msg, re.IGNORECASE).group(1)
-                    + re.search(r'(Call-ID:[^\r\n]+\r\n)', msg, re.IGNORECASE).group(1)
-                    + re.search(r'(CSeq:[^\r\n]+\r\n)', msg, re.IGNORECASE).group(1)
+                    f"{v_str}"
+                    + (f"{f_m.group(1)}\r\n" if f_m else "")
+                    + (f"{t_m.group(1)}\r\n" if t_m else "")
+                    + (f"{c_m.group(1)}\r\n" if c_m else "")
+                    + (f"{cs_m.group(1)}\r\n" if cs_m else "")
                     + "Allow: INVITE, ACK, CANCEL, BYE, OPTIONS\r\n"
                     + "Content-Length: 0\r\n\r\n"
                 )
@@ -1369,16 +1388,23 @@ def run_inbound_sip_server(port=5060):
                     print("✅ Linphone Registration Confirmed: 200 OK")
 
             elif first_line.startswith("BYE"):
+                via_lines = re.findall(r'(Via:\s*[^\r\n]+)', msg, re.IGNORECASE)
+                v_str = "".join(f"{vl.strip()}\r\n" for vl in via_lines)
+                f_m = re.search(r'(From:\s*[^\r\n]+)', msg, re.IGNORECASE)
+                t_m = re.search(r'(To:\s*[^\r\n]+)', msg, re.IGNORECASE)
+                c_m = re.search(r'(Call-ID:\s*[^\r\n]+)', msg, re.IGNORECASE)
+                cs_m = re.search(r'(CSeq:\s*[^\r\n]+)', msg, re.IGNORECASE)
                 resp_bye = (
                     "SIP/2.0 200 OK\r\n"
-                    + re.search(r'(Via:[^\r\n]+\r\n)', msg, re.IGNORECASE).group(1)
-                    + re.search(r'(From:[^\r\n]+\r\n)', msg, re.IGNORECASE).group(1)
-                    + re.search(r'(To:[^\r\n]+\r\n)', msg, re.IGNORECASE).group(1)
-                    + re.search(r'(Call-ID:[^\r\n]+\r\n)', msg, re.IGNORECASE).group(1)
-                    + re.search(r'(CSeq:[^\r\n]+\r\n)', msg, re.IGNORECASE).group(1)
+                    f"{v_str}"
+                    + (f"{f_m.group(1)}\r\n" if f_m else "")
+                    + (f"{t_m.group(1)}\r\n" if t_m else "")
+                    + (f"{c_m.group(1)}\r\n" if c_m else "")
+                    + (f"{cs_m.group(1)}\r\n" if cs_m else "")
                     + "Content-Length: 0\r\n\r\n"
                 )
                 sock.sendto(resp_bye.encode(), addr)
+
 
         except Exception as e:
             time.sleep(0.05)
