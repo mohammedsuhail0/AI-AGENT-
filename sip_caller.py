@@ -45,6 +45,12 @@ import edge_tts
 import miniaudio
 import audioop
 from groq import Groq
+import base64
+try:
+    import pylibsrtp
+    HAVE_SRTP = True
+except ImportError:
+    HAVE_SRTP = False
 
 # Set Windows multimedia timer resolution to 1ms for studio-grade low jitter
 try:
@@ -222,10 +228,11 @@ def generate_beep_ulaw(freq=660, duration_sec=0.15) -> bytes:
 
 class RTPPlayer:
     """Maintains continuous monotonic RFC 3550 RTP sequence numbers and timestamps with sub-millisecond frame pacing."""
-    def __init__(self, rtp_sock, destinations, ssrc=0x34A8129B):
+    def __init__(self, rtp_sock, destinations, ssrc=0x34A8129B, srtp_session=None):
         self.rtp_sock = rtp_sock
         self.destinations = destinations
         self.ssrc = ssrc
+        self.srtp_session = srtp_session
         self.seq = 1
         self.timestamp = 0
 
@@ -241,6 +248,12 @@ class RTPPlayer:
                 chunk += b"\xff" * (chunk_size - len(chunk))
                 
             pkt = make_rtp_packet(self.seq, self.timestamp, self.ssrc, chunk, marker=(idx == 0))
+            if self.srtp_session:
+                try:
+                    pkt = self.srtp_session.protect(pkt)
+                except Exception:
+                    pass
+
             for target_ip, target_port in self.destinations:
                 try:
                     self.rtp_sock.sendto(pkt, (target_ip, target_port))
@@ -328,11 +341,11 @@ def build_sdp_offer(local_ip: str, public_ip: str, local_rtp_port: int, is_lan: 
     return sdp
 
 
-def build_sdp_answer(offer_sdp: str, local_ip: str, public_ip: str, local_rtp_port: int, is_lan: bool = True) -> str:
+def build_sdp_answer(offer_sdp: str, local_ip: str, public_ip: str, local_rtp_port: int, is_lan: bool = True) -> tuple[str, any, any]:
     """
-    Constructs an RFC 3264 compliant SDP answer matching the exact number and order of m= lines in the offer.
-    Accepts audio with standard PCMU/PCMA. Rejects any non-audio streams (e.g. video) with port 0 and 0.0.0.0.
-    Dynamically maps telephone-event payload type matching 8000Hz to avoid clockrate mismatch.
+    Constructs an RFC 3264 / RFC 4568 compliant SDP answer matching the exact number and order of m= lines in the offer.
+    Supports both plain RTP (RTP/AVP) and SRTP (RTP/SAVP / RTP/SAVPF).
+    Returns (sdp_answer_str, tx_srtp_session, rx_srtp_session).
     """
     adv_ip = local_ip if is_lan else public_ip
     sdp_lines = [
@@ -342,6 +355,33 @@ def build_sdp_answer(offer_sdp: str, local_ip: str, public_ip: str, local_rtp_po
         f"c=IN IP4 {adv_ip}",
         "t=0 0"
     ]
+
+    # Check for BUNDLE and mid in offer
+    mid_m = re.search(r'a=mid:([^\r\n]+)', offer_sdp)
+    mid_val = mid_m.group(1).strip() if mid_m else None
+    if "a=group:BUNDLE" in offer_sdp and mid_val:
+        sdp_lines.append(f"a=group:BUNDLE {mid_val}")
+
+    # Check for SRTP in offer (AES_CM_128_HMAC_SHA1_80)
+    tx_srtp, rx_srtp = None, None
+    crypto_answer_line = None
+    crypto_match = re.search(r'a=crypto:(\d+)\s+(AES_CM_128_HMAC_SHA1_80)\s+inline:([A-Za-z0-9+/=]+)', offer_sdp)
+    if crypto_match and HAVE_SRTP:
+        tag, suite, rem_b64 = crypto_match.groups()
+        rem_b64_clean = rem_b64.split("|")[0].strip()
+        try:
+            rem_key = base64.b64decode(rem_b64_clean)
+            if len(rem_key) == 30:
+                loc_key = os.urandom(30)
+                loc_b64 = base64.b64encode(loc_key).decode()
+                crypto_answer_line = f"a=crypto:{tag} {suite} inline:{loc_b64}"
+                rx_policy = pylibsrtp.Policy(key=rem_key, ssrc_type=pylibsrtp.Policy.SSRC_ANY_INBOUND)
+                rx_srtp = pylibsrtp.Session(policy=rx_policy)
+                tx_policy = pylibsrtp.Policy(key=loc_key, ssrc_type=pylibsrtp.Policy.SSRC_ANY_OUTBOUND)
+                tx_srtp = pylibsrtp.Session(policy=tx_policy)
+                print(f"🔒 SRTP Negotiated successfully with suite {suite} (Tag: {tag})")
+        except Exception as e:
+            print(f"⚠️ SRTP setup error: {e}")
 
     # Find telephone-event payload type strictly at 8000Hz from offer
     te_match = re.search(r'a=rtpmap:(\d+)\s+telephone-event/8000', offer_sdp, re.IGNORECASE)
@@ -353,28 +393,36 @@ def build_sdp_answer(offer_sdp: str, local_ip: str, public_ip: str, local_rtp_po
         m_blocks = [("audio", "0", "RTP/AVP 0 8")]
 
     for m_type, m_port, m_rest in m_blocks:
+        parts = m_rest.split()
+        proto = parts[0] if parts else "RTP/AVP"
         if m_type.lower() == "audio":
+            # Echo proto: RTP/SAVPF if SRTP negotiated, else RTP/AVP
+            ans_proto = proto if (crypto_answer_line and "SAVP" in proto) else "RTP/AVP"
             codecs = ["0", "8"]
             if te_pt:
                 codecs.append(te_pt)
             codecs_str = " ".join(codecs)
-            sdp_lines.append(f"m=audio {local_rtp_port} RTP/AVP {codecs_str}")
+            sdp_lines.append(f"m=audio {local_rtp_port} {ans_proto} {codecs_str}")
+            if crypto_answer_line:
+                sdp_lines.append(crypto_answer_line)
             sdp_lines.append("a=rtpmap:0 PCMU/8000")
             sdp_lines.append("a=rtpmap:8 PCMA/8000")
             if te_pt:
                 sdp_lines.append(f"a=rtpmap:{te_pt} telephone-event/8000")
+            if "a=rtcp-mux" in offer_sdp:
+                sdp_lines.append("a=rtcp-mux")
+            if mid_val:
+                sdp_lines.append(f"a=mid:{mid_val}")
             sdp_lines.append(f"a=candidate:1 1 UDP 2130706431 {local_ip} {local_rtp_port} typ host")
             sdp_lines.append(f"a=candidate:2 1 UDP 1694498815 {public_ip} {local_rtp_port} typ srflx")
             sdp_lines.append("a=sendrecv")
         else:
             # Reject non-audio stream (e.g. video) with port 0 and c=IN IP4 0.0.0.0 per RFC 3264
-            parts = m_rest.split()
-            proto = parts[0] if parts else "RTP/AVP"
             fmts = " ".join(parts[1:]) if len(parts) > 1 else "0"
             sdp_lines.append(f"m={m_type} 0 {proto} {fmts}")
             sdp_lines.append("c=IN IP4 0.0.0.0")
 
-    return "\r\n".join(sdp_lines) + "\r\n"
+    return "\r\n".join(sdp_lines) + "\r\n", tx_srtp, rx_srtp
 
 
 def pcm_to_wav_bytes(pcm_data: bytes, sample_rate: int = 8000) -> bytes:
@@ -486,11 +534,12 @@ def is_user_confirming_send(transcript: str, dtmf: str = None) -> bool:
     return False
 
 
-def record_user_speech(rtp_sock, max_seconds=9.0, silence_timeout=1.2, player=None) -> tuple[bytes, str]:
+def record_user_speech(rtp_sock, max_seconds=9.0, silence_timeout=1.2, player=None, srtp_session=None) -> tuple[bytes, str]:
     """
     Records incoming RTP audio packets from the user's phone microphone.
     Natural 1.2s silence timeout gives comfortable room for conversational pauses.
     Supports symmetric RTP: automatically locks onto the sender's transmitting port.
+    Supports SRTP decryption when srtp_session is provided.
     Returns (linear_pcm_bytes, dtmf_digit).
     """
     # Drain any buffered packets from socket
@@ -513,6 +562,12 @@ def record_user_speech(rtp_sock, max_seconds=9.0, silence_timeout=1.2, player=No
     while time.time() - start_time < max_seconds:
         try:
             data, sender_addr = rtp_sock.recvfrom(2048)
+            if srtp_session:
+                try:
+                    data = srtp_session.unprotect(data)
+                except Exception:
+                    continue
+
             if len(data) < 12:
                 continue
             
@@ -642,7 +697,7 @@ def _trigger_urgent_call_impl(
     print(f"Target: {target_sip_uri}")
     print(f"Sender: {clean_sender}")
     print(f"Subject: {clean_subject}")
-    print(f"Voice: British Executive (en-GB-RyanNeural, rate={VOICE_RATE})")
+    print(f"Voice: British Executive ({VOICE_NAME}, rate={VOICE_RATE})")
     print(f"=======================================================")
 
     # Load pre-cached static filler assets instantly (0.001s)
@@ -1174,7 +1229,7 @@ Respond ONLY with valid JSON:
     }
 
 
-def handle_inbound_voice_session(rtp_sock, destinations, call_id, from_tag, to_tag, contact_uri, caller_ip, caller_port, sip_sock, local_ip, local_port, routes=None):
+def handle_inbound_voice_session(rtp_sock, destinations, call_id, from_tag, to_tag, contact_uri, caller_ip, caller_port, sip_sock, local_ip, local_port, routes=None, tx_srtp=None, rx_srtp=None):
     """Executes full interactive AI voice agent when Suhail calls in."""
     # Pre-lock symmetric RTP: wait up to 0.8s for the phone's audio channel to open upon pickup
     rtp_sock.settimeout(0.08)
@@ -1189,7 +1244,7 @@ def handle_inbound_voice_session(rtp_sock, destinations, call_id, from_tag, to_t
         except Exception:
             pass
 
-    player = RTPPlayer(rtp_sock, destinations)
+    player = RTPPlayer(rtp_sock, destinations, srtp_session=tx_srtp)
     beep_ulaw = generate_beep_ulaw(freq=800, duration_sec=0.18)
     inbound_greeting = get_or_create_cached_audio("inbound_greeting", "Hello boss, I'm listening. Who would you like me to email, and what should I say?")
     ack_drafting_ulaw = get_or_create_cached_audio("ack_drafting", "On it boss, drafting that now.")
@@ -1203,7 +1258,7 @@ def handle_inbound_voice_session(rtp_sock, destinations, call_id, from_tag, to_t
     player.play(beep_ulaw)
 
     # 2. Record command (pass player so symmetric RTP locks onto phone's incoming port)
-    user_pcm, dtmf_digit = record_user_speech(rtp_sock, max_seconds=9.0, silence_timeout=1.2, player=player)
+    user_pcm, dtmf_digit = record_user_speech(rtp_sock, max_seconds=9.0, silence_timeout=1.2, player=player, srtp_session=rx_srtp)
     player.play(ack_drafting_ulaw)
 
     transcript = transcribe_pcm_audio(user_pcm) if len(user_pcm) >= 1500 else ""
@@ -1214,7 +1269,7 @@ def handle_inbound_voice_session(rtp_sock, destinations, call_id, from_tag, to_t
         retry_prompt = asyncio.run(generate_speech_ulaw("I didn't catch that boss. Who would you like me to email, and what should I say?", rate=VOICE_RATE, pitch=VOICE_PITCH))
         player.play(retry_prompt)
         player.play(beep_ulaw)
-        user_pcm, dtmf_digit = record_user_speech(rtp_sock, max_seconds=9.0, silence_timeout=1.2, player=player)
+        user_pcm, dtmf_digit = record_user_speech(rtp_sock, max_seconds=9.0, silence_timeout=1.2, player=player, srtp_session=rx_srtp)
         transcript = transcribe_pcm_audio(user_pcm) if len(user_pcm) >= 1500 else ""
         print(f"🗣️ BOSS INBOUND RETRY COMMAND: '{transcript}'")
 
@@ -1240,7 +1295,7 @@ def handle_inbound_voice_session(rtp_sock, destinations, call_id, from_tag, to_t
     player.play(confirm_q_ulaw)
     player.play(beep_ulaw)
 
-    confirm_pcm, confirm_dtmf = record_user_speech(rtp_sock, max_seconds=5.0, silence_timeout=1.0, player=player)
+    confirm_pcm, confirm_dtmf = record_user_speech(rtp_sock, max_seconds=5.0, silence_timeout=1.0, player=player, srtp_session=rx_srtp)
     confirm_transcript = transcribe_pcm_audio(confirm_pcm) if len(confirm_pcm) >= 1500 else ""
     user_confirmed = is_user_confirming_send(confirm_transcript, confirm_dtmf)
     print(f"🗣️ BOSS CONFIRMATION: '{confirm_transcript}' | Decision: {user_confirmed}")
@@ -1459,7 +1514,7 @@ def run_inbound_sip_server(port=5060):
                 rtp_sock.bind(("0.0.0.0", 0))
                 local_rtp_port = rtp_sock.getsockname()[1]
 
-                sdp_answer = build_sdp_answer(sdp_part, local_ip, public_ip, local_rtp_port, is_lan=is_on_lan)
+                sdp_answer, tx_srtp, rx_srtp = build_sdp_answer(sdp_part, local_ip, public_ip, local_rtp_port, is_lan=is_on_lan)
                 print(f"📤 200 OK SDP ANSWER:\n{sdp_answer.strip()}\n")
 
                 resp_200 = (
@@ -1482,7 +1537,7 @@ def run_inbound_sip_server(port=5060):
 
                 t = threading.Thread(
                     target=handle_inbound_voice_session,
-                    args=(rtp_sock, destinations, call_id, from_tag, to_tag, contact_uri, addr[0], addr[1], sock, advertised_ip, port, record_routes),
+                    args=(rtp_sock, destinations, call_id, from_tag, to_tag, contact_uri, addr[0], addr[1], sock, advertised_ip, port, record_routes, tx_srtp, rx_srtp),
                     daemon=True,
                     name="TARS-Inbound-Call"
                 )

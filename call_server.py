@@ -41,9 +41,9 @@ if os.path.exists(env_path):
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
-VOICE_NAME = os.environ.get("TARS_VOICE", "en-GB-RyanNeural")  # Marvel's JARVIS (Paul Bettany British accent)
-VOICE_PITCH = "-2Hz"
-VOICE_RATE = "+4%"
+VOICE_NAME = os.environ.get("TARS_VOICE", "en-GB-ThomasNeural")  # Marvel's JARVIS (Paul Bettany British accent)
+VOICE_PITCH = "+0Hz"
+VOICE_RATE = "+10%"
 
 app = FastAPI(title="TARS Voice Sentinel API", version="1.0.0")
 
