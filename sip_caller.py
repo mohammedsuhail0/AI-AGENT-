@@ -171,54 +171,64 @@ def get_or_create_cached_audio(name: str, text: str) -> bytes:
     return ulaw
 
 
-def generate_beep_ulaw(freq=800, duration_sec=0.18) -> bytes:
-    """Generates a brief intercom prompt beep in u-law to signal user when TARS is listening."""
+def generate_beep_ulaw(freq=660, duration_sec=0.15) -> bytes:
+    """Generates a pleasant, smooth intercom chime with 12ms cosine fade envelopes to prevent audio pops."""
     pcm = bytearray()
-    for i in range(int(8000 * duration_sec)):
-        val = int(12000 * math.sin(2 * math.pi * freq * i / 8000))
+    total_samples = int(8000 * duration_sec)
+    fade_len = int(8000 * 0.012)  # 12ms smooth fade in and out
+    for i in range(total_samples):
+        if i < fade_len:
+            env = 0.5 * (1 - math.cos(math.pi * i / fade_len))
+        elif i > total_samples - fade_len:
+            env = 0.5 * (1 - math.cos(math.pi * (total_samples - i) / fade_len))
+        else:
+            env = 1.0
+        val = int(8000 * env * math.sin(2 * math.pi * freq * i / 8000))
         pcm.extend(struct.pack("<h", val))
     return audioop.lin2ulaw(bytes(pcm), 2)
 
 
-def stream_audio(rtp_sock, destinations, ulaw_data, repeat=1, ssrc=0x34A8129B):
-    """Streams audio packets smoothly with strict 20ms cadence to the target destination."""
-    chunk_size = 160
-    seq = 1
-    timestamp = 0
-    start_time = time.time()
-    
-    ipv4_sock = rtp_sock
-    ipv6_sock = None
-    try:
-        ipv6_sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
-    except Exception:
-        pass
+class RTPPlayer:
+    """Maintains continuous monotonic RFC 3550 RTP sequence numbers and timestamps to prevent DAC pops and jitter resets."""
+    def __init__(self, rtp_sock, destinations, ssrc=0x34A8129B):
+        self.rtp_sock = rtp_sock
+        self.destinations = destinations
+        self.ssrc = ssrc
+        self.seq = 1
+        self.timestamp = 0
 
-    for r in range(repeat):
-        for i in range(0, len(ulaw_data), chunk_size):
-            chunk = ulaw_data[i:i+chunk_size]
+    def play(self, ulaw_data):
+        chunk_size = 160
+        start_time = time.time()
+        chunks_count = (len(ulaw_data) + chunk_size - 1) // chunk_size
+        
+        for idx in range(chunks_count):
+            start = idx * chunk_size
+            chunk = ulaw_data[start:start + chunk_size]
             if len(chunk) < chunk_size:
                 chunk += b"\xff" * (chunk_size - len(chunk))
-            pkt = make_rtp_packet(seq, timestamp, ssrc, chunk, marker=(seq == 1))
-            
-            for target_ip, target_port in destinations:
+                
+            pkt = make_rtp_packet(self.seq, self.timestamp, self.ssrc, chunk, marker=(idx == 0))
+            for target_ip, target_port in self.destinations:
                 try:
-                    if ":" in target_ip:
-                        if ipv6_sock:
-                            ipv6_sock.sendto(pkt, (target_ip, target_port))
-                    else:
-                        ipv4_sock.sendto(pkt, (target_ip, target_port))
+                    self.rtp_sock.sendto(pkt, (target_ip, target_port))
                 except Exception:
                     pass
-            
-            seq += 1
-            timestamp += 160
-            target_time = start_time + (seq * 0.02)
+
+            self.seq = (self.seq + 1) & 0xFFFF
+            self.timestamp = (self.timestamp + 160) & 0xFFFFFFFF
+
+            target_time = start_time + (0.02 * (idx + 1))
             sleep_dur = target_time - time.time()
             if sleep_dur > 0:
                 time.sleep(sleep_dur)
-        if r < repeat - 1:
-            time.sleep(0.15)
+
+
+def stream_audio(rtp_sock, destinations, ulaw_data, repeat=1, ssrc=0x34A8129B):
+    """Convenience wrapper for legacy calls."""
+    player = RTPPlayer(rtp_sock, destinations, ssrc=ssrc)
+    for _ in range(repeat):
+        player.play(ulaw_data)
 
 
 def select_best_rtp_destination(sdp_text: str) -> list[tuple[str, int]]:
@@ -707,14 +717,16 @@ def trigger_urgent_call(
         synth_t.join(timeout=8.0)
         greeting_ulaw = greeting_holder[0] or (b"\xff" * 16000)
 
+        # Initialize continuous RTP player for unbroken audio stream (prevents pops/clicks)
+        player = RTPPlayer(rtp_sock, destinations)
+
         # -------------------------------------------------------------
         # TURN 1: FAST BRIEFING (<4s)
         # -------------------------------------------------------------
         if destinations:
             print("🗣️ TARS Speaking Initial Briefing...")
-            stream_audio(rtp_sock, destinations, greeting_ulaw, repeat=1)
-            time.sleep(0.05)
-            stream_audio(rtp_sock, destinations, beep_ulaw, repeat=1)
+            player.play(greeting_ulaw)
+            player.play(beep_ulaw)
 
         # -------------------------------------------------------------
         # TURN 2: USER DICTATES INSTRUCTIONS (Snappy 0.8s Silence Cut)
@@ -723,7 +735,7 @@ def trigger_urgent_call(
 
         # Instant 0ms filler audio: No dead silence!
         if destinations:
-            stream_audio(rtp_sock, destinations, ack_drafting_ulaw, repeat=1)
+            player.play(ack_drafting_ulaw)
 
         transcript = ""
         if dtmf_digit == "1":
@@ -755,15 +767,14 @@ def trigger_urgent_call(
         if intent == "CANCEL":
             cancel_audio = get_or_create_cached_audio("cancel", "Understood sir. Email canceled. Standing by.")
             if destinations:
-                stream_audio(rtp_sock, destinations, cancel_audio, repeat=1)
+                player.play(cancel_audio)
             action_summary = "Email canceled as requested"
         else:
             print(f"🗣️ TARS Confirming with User: '{spoken_confirmation}'")
             confirm_q_ulaw = asyncio.run(generate_speech_ulaw(spoken_confirmation, rate="+15%"))
             if destinations:
-                stream_audio(rtp_sock, destinations, confirm_q_ulaw, repeat=1)
-                time.sleep(0.05)
-                stream_audio(rtp_sock, destinations, beep_ulaw, repeat=1)
+                player.play(confirm_q_ulaw)
+                player.play(beep_ulaw)
 
             # Listen for quick confirmation (0.6s silence timeout)
             confirm_pcm, confirm_dtmf = record_user_speech(rtp_sock, max_seconds=4.0, silence_timeout=0.6)
@@ -777,12 +788,11 @@ def trigger_urgent_call(
             # -------------------------------------------------------------
             if user_confirmed:
                 if destinations:
-                    stream_audio(rtp_sock, destinations, ack_sending_ulaw, repeat=1)
+                    player.play(ack_sending_ulaw)
 
                 import tars_agent
                 if email_id and drafted_body:
                     print(f"🚀 Instant Gmail reply with pre-drafted body (attach_resume={attach_resume})...")
-                    # Direct dispatch using pre-drafted body (skips extra LLM call!)
                     res = tars_agent.tool_reply_to_emails(
                         email_ids=[email_id],
                         body=drafted_body,
@@ -795,11 +805,11 @@ def trigger_urgent_call(
                     action_summary = f"Simulated dispatch for '{clean_subject}'"
 
                 if destinations:
-                    stream_audio(rtp_sock, destinations, farewell_ulaw, repeat=1)
+                    player.play(farewell_ulaw)
             else:
                 farewell_cancel = get_or_create_cached_audio("cancel", "Understood sir. Email canceled. Standing by.")
                 if destinations:
-                    stream_audio(rtp_sock, destinations, farewell_cancel, repeat=1)
+                    player.play(farewell_cancel)
                 action_summary = "Held for manual review in Telegram bot"
 
         send_telegram_summary(
