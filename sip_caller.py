@@ -269,14 +269,24 @@ def stream_audio(rtp_sock, destinations, ulaw_data, repeat=1, ssrc=0x34A8129B):
 
 def select_best_rtp_destination(sdp_text: str) -> list[tuple[str, int]]:
     """
-    Parses SDP to extract ONLY component 1 (RTP audio, ignoring component 2 RTCP).
+    Parses SDP to extract ONLY audio stream component 1 (RTP audio, strictly ignoring video and RTCP).
     Selects the single best destination to avoid packet duplication, jitter drops, and comb filtering.
     """
-    cand_matches = re.findall(r'a=candidate:\S+\s+1\s+(?:UDP|udp)\s+\d+\s+([^\s]+)\s+(\d+)', sdp_text)
+    # Isolate ONLY the m=audio section to prevent picking up video RTP ports/candidates
+    audio_section = sdp_text
+    m_audio = re.search(r'(m=audio\s+[^\r\n]+(?:[\r\n]+(?!m=)[^\r\n]+)*)', sdp_text, re.IGNORECASE)
+    if m_audio:
+        audio_section = m_audio.group(1)
+
+    cand_matches = re.findall(r'a=candidate:\S+\s+1\s+(?:UDP|udp)\s+\d+\s+([^\s]+)\s+(\d+)', audio_section)
     destinations = [(ip.strip(), int(port)) for ip, port in cand_matches]
 
-    c_ip = re.search(r'c=IN\s+(?:IP4|IP6)\s+([^\r\n;]+)', sdp_text)
-    m_port = re.search(r'm=audio\s+(\d+)', sdp_text)
+    # Connection IP: check audio section first, fallback to session level
+    c_ip = re.search(r'c=IN\s+(?:IP4|IP6)\s+([^\r\n;]+)', audio_section)
+    if not c_ip:
+        c_ip = re.search(r'c=IN\s+(?:IP4|IP6)\s+([^\r\n;]+)', sdp_text)
+
+    m_port = re.search(r'm=audio\s+(\d+)', audio_section)
     if c_ip and m_port:
         pair = (c_ip.group(1).strip(), int(m_port.group(1)))
         if pair not in destinations:
@@ -284,11 +294,11 @@ def select_best_rtp_destination(sdp_text: str) -> list[tuple[str, int]]:
 
     lan_dests = [d for d in destinations if d[0].startswith(("192.168.", "10.", "172."))]
     if lan_dests:
-        print(f"🎯 Selected single Wi-Fi RTP endpoint: {lan_dests[0]} (Zero packet duplication, studio clean)")
+        print(f"🎯 Selected single Wi-Fi Audio RTP endpoint: {lan_dests[0]} (Zero packet duplication, studio clean)")
         return [lan_dests[0]]
 
     if destinations:
-        print(f"🎯 Selected single WAN RTP endpoint: {destinations[0]}")
+        print(f"🎯 Selected single WAN Audio RTP endpoint: {destinations[0]}")
         return [destinations[0]]
         
     return []
@@ -321,7 +331,8 @@ def build_sdp_offer(local_ip: str, public_ip: str, local_rtp_port: int, is_lan: 
 def build_sdp_answer(offer_sdp: str, local_ip: str, public_ip: str, local_rtp_port: int, is_lan: bool = True) -> str:
     """
     Constructs an RFC 3264 compliant SDP answer matching the exact number and order of m= lines in the offer.
-    Accepts audio with PCMU/PCMA. Rejects any non-audio streams (e.g. video) with port 0.
+    Accepts audio with standard PCMU/PCMA. Rejects any non-audio streams (e.g. video) with port 0 and 0.0.0.0.
+    Dynamically maps telephone-event payload type matching 8000Hz to avoid clockrate mismatch.
     """
     adv_ip = local_ip if is_lan else public_ip
     sdp_lines = [
@@ -332,22 +343,36 @@ def build_sdp_answer(offer_sdp: str, local_ip: str, public_ip: str, local_rtp_po
         "t=0 0"
     ]
 
-    m_lines = re.findall(r'm=(\w+)\s+(\d+)\s+([^\r\n]+)', offer_sdp)
-    if not m_lines:
-        m_lines = [("audio", "0", "RTP/AVP 0 8 101")]
+    # Find telephone-event payload type strictly at 8000Hz from offer
+    te_match = re.search(r'a=rtpmap:(\d+)\s+telephone-event/8000', offer_sdp, re.IGNORECASE)
+    te_pt = te_match.group(1) if te_match else None
 
-    for m_type, m_port, m_rest in m_lines:
+    # Parse all m= blocks in the offer to maintain 1-to-1 correspondence
+    m_blocks = re.findall(r'm=(\w+)\s+(\d+)\s+([^\r\n]+)', offer_sdp)
+    if not m_blocks:
+        m_blocks = [("audio", "0", "RTP/AVP 0 8")]
+
+    for m_type, m_port, m_rest in m_blocks:
         if m_type.lower() == "audio":
-            sdp_lines.append(f"m=audio {local_rtp_port} RTP/AVP 0 8 101")
+            codecs = ["0", "8"]
+            if te_pt:
+                codecs.append(te_pt)
+            codecs_str = " ".join(codecs)
+            sdp_lines.append(f"m=audio {local_rtp_port} RTP/AVP {codecs_str}")
             sdp_lines.append("a=rtpmap:0 PCMU/8000")
             sdp_lines.append("a=rtpmap:8 PCMA/8000")
-            sdp_lines.append("a=rtpmap:101 telephone-event/8000")
+            if te_pt:
+                sdp_lines.append(f"a=rtpmap:{te_pt} telephone-event/8000")
             sdp_lines.append(f"a=candidate:1 1 UDP 2130706431 {local_ip} {local_rtp_port} typ host")
             sdp_lines.append(f"a=candidate:2 1 UDP 1694498815 {public_ip} {local_rtp_port} typ srflx")
             sdp_lines.append("a=sendrecv")
         else:
-            first_fmt = m_rest.split()[-1] if m_rest.split() else "0"
-            sdp_lines.append(f"m={m_type} 0 RTP/AVP {first_fmt}")
+            # Reject non-audio stream (e.g. video) with port 0 and c=IN IP4 0.0.0.0 per RFC 3264
+            parts = m_rest.split()
+            proto = parts[0] if parts else "RTP/AVP"
+            fmts = " ".join(parts[1:]) if len(parts) > 1 else "0"
+            sdp_lines.append(f"m={m_type} 0 {proto} {fmts}")
+            sdp_lines.append("c=IN IP4 0.0.0.0")
 
     return "\r\n".join(sdp_lines) + "\r\n"
 
@@ -1151,10 +1176,10 @@ Respond ONLY with valid JSON:
 
 def handle_inbound_voice_session(rtp_sock, destinations, call_id, from_tag, to_tag, contact_uri, caller_ip, caller_port, sip_sock, local_ip, local_port, routes=None):
     """Executes full interactive AI voice agent when Suhail calls in."""
-    # Pre-lock symmetric RTP if incoming audio packet is ready
-    rtp_sock.settimeout(0.05)
+    # Pre-lock symmetric RTP: wait up to 0.8s for the phone's audio channel to open upon pickup
+    rtp_sock.settimeout(0.08)
     prelock_start = time.time()
-    while time.time() - prelock_start < 0.4:
+    while time.time() - prelock_start < 0.8:
         try:
             data, s_addr = rtp_sock.recvfrom(2048)
             if len(data) >= 12 and s_addr:
@@ -1422,6 +1447,7 @@ def run_inbound_sip_server(port=5060):
                 sock.sendto(resp_100.encode(), addr)
 
                 sdp_part = msg.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in msg else ""
+                print(f"📥 INBOUND SDP OFFER:\n{sdp_part.strip()}\n")
                 destinations = select_best_rtp_destination(sdp_part)
                 if not destinations:
                     destinations = [(addr[0], 7078)]
@@ -1434,6 +1460,7 @@ def run_inbound_sip_server(port=5060):
                 local_rtp_port = rtp_sock.getsockname()[1]
 
                 sdp_answer = build_sdp_answer(sdp_part, local_ip, public_ip, local_rtp_port, is_lan=is_on_lan)
+                print(f"📤 200 OK SDP ANSWER:\n{sdp_answer.strip()}\n")
 
                 resp_200 = (
                     "SIP/2.0 200 OK\r\n"
