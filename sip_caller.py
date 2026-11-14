@@ -294,6 +294,64 @@ def select_best_rtp_destination(sdp_text: str) -> list[tuple[str, int]]:
     return []
 
 
+def build_sdp_offer(local_ip: str, public_ip: str, local_rtp_port: int, is_lan: bool = True) -> str:
+    """
+    Constructs an RFC 3264 / RFC 3551 compliant Early Offer SDP.
+    Offers audio only with PCMU (0), PCMA (8), and telephone-event (101).
+    Includes ICE candidate lines for both LAN host and WAN srflx.
+    """
+    adv_ip = local_ip if is_lan else public_ip
+    sdp = (
+        "v=0\r\n"
+        f"o=tars 123456 123456 IN IP4 {adv_ip}\r\n"
+        "s=TARS Sentinel\r\n"
+        f"c=IN IP4 {adv_ip}\r\n"
+        "t=0 0\r\n"
+        f"m=audio {local_rtp_port} RTP/AVP 0 8 101\r\n"
+        "a=rtpmap:0 PCMU/8000\r\n"
+        "a=rtpmap:8 PCMA/8000\r\n"
+        "a=rtpmap:101 telephone-event/8000\r\n"
+        f"a=candidate:1 1 UDP 2130706431 {local_ip} {local_rtp_port} typ host\r\n"
+        f"a=candidate:2 1 UDP 1694498815 {public_ip} {local_rtp_port} typ srflx\r\n"
+        "a=sendrecv\r\n"
+    )
+    return sdp
+
+
+def build_sdp_answer(offer_sdp: str, local_ip: str, public_ip: str, local_rtp_port: int, is_lan: bool = True) -> str:
+    """
+    Constructs an RFC 3264 compliant SDP answer matching the exact number and order of m= lines in the offer.
+    Accepts audio with PCMU/PCMA. Rejects any non-audio streams (e.g. video) with port 0.
+    """
+    adv_ip = local_ip if is_lan else public_ip
+    sdp_lines = [
+        "v=0",
+        f"o=tars 123456 123456 IN IP4 {adv_ip}",
+        "s=TARS Sentinel",
+        f"c=IN IP4 {adv_ip}",
+        "t=0 0"
+    ]
+
+    m_lines = re.findall(r'm=(\w+)\s+(\d+)\s+([^\r\n]+)', offer_sdp)
+    if not m_lines:
+        m_lines = [("audio", "0", "RTP/AVP 0 8 101")]
+
+    for m_type, m_port, m_rest in m_lines:
+        if m_type.lower() == "audio":
+            sdp_lines.append(f"m=audio {local_rtp_port} RTP/AVP 0 8 101")
+            sdp_lines.append("a=rtpmap:0 PCMU/8000")
+            sdp_lines.append("a=rtpmap:8 PCMA/8000")
+            sdp_lines.append("a=rtpmap:101 telephone-event/8000")
+            sdp_lines.append(f"a=candidate:1 1 UDP 2130706431 {local_ip} {local_rtp_port} typ host")
+            sdp_lines.append(f"a=candidate:2 1 UDP 1694498815 {public_ip} {local_rtp_port} typ srflx")
+            sdp_lines.append("a=sendrecv")
+        else:
+            first_fmt = m_rest.split()[-1] if m_rest.split() else "0"
+            sdp_lines.append(f"m={m_type} 0 RTP/AVP {first_fmt}")
+
+    return "\r\n".join(sdp_lines) + "\r\n"
+
+
 def pcm_to_wav_bytes(pcm_data: bytes, sample_rate: int = 8000) -> bytes:
     """Converts raw 16-bit mono linear PCM to WAV in memory."""
     buf = io.BytesIO()
@@ -583,6 +641,7 @@ def _trigger_urgent_call_impl(
     rtp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     rtp_sock.bind(("0.0.0.0", 0))
     local_rtp_port = rtp_sock.getsockname()[1]
+    sdp_offer = build_sdp_offer(local_ip, public_ip, local_rtp_port, is_lan=True)
 
     call_id = uuid.uuid4().hex + "@" + public_ip
     from_tag = uuid.uuid4().hex[:8]
@@ -598,7 +657,9 @@ def _trigger_urgent_call_impl(
         f"Contact: <sip:{username}@{public_ip}:{local_sip_port};transport=UDP>\r\n"
         "Max-Forwards: 70\r\n"
         f"User-Agent: {CALLER_DISPLAY}\r\n"
-        "Content-Length: 0\r\n\r\n"
+        "Content-Type: application/sdp\r\n"
+        f"Content-Length: {len(sdp_offer)}\r\n\r\n"
+        f"{sdp_offer}"
     )
 
     print(f"📞 Dialing {target_sip_uri} as '{CALLER_DISPLAY}'...")
@@ -663,10 +724,12 @@ def _trigger_urgent_call_impl(
         f"{auth_req_name}: {auth_val}\r\n"
         "Max-Forwards: 70\r\n"
         f"User-Agent: {CALLER_DISPLAY}\r\n"
-        "Content-Length: 0\r\n\r\n"
+        "Content-Type: application/sdp\r\n"
+        f"Content-Length: {len(sdp_offer)}\r\n\r\n"
+        f"{sdp_offer}"
     )
 
-    print("🔐 Authenticating with Flexisip server (Late Offer)...")
+    print("🔐 Authenticating with Flexisip server (Early Offer)...")
     sip_sock.sendto(invite2.encode(), (server, server_port))
 
     ringing_detected = False
@@ -675,10 +738,11 @@ def _trigger_urgent_call_impl(
     callee_tag = ""
     routes = []
 
+    resp_addr = None
     ring_start = time.time()
     while time.time() - ring_start < ring_timeout:
         try:
-            data, _ = sip_sock.recvfrom(4096)
+            data, resp_addr = sip_sock.recvfrom(4096)
             msg = data.decode("utf-8", errors="ignore")
 
             first_line = msg.splitlines()[0] if msg.splitlines() else "EMPTY"
@@ -717,24 +781,6 @@ def _trigger_urgent_call_impl(
         destinations = select_best_rtp_destination(callee_sdp)
         print(f"Target RTP Audio Destination: {destinations}")
 
-        is_on_lan = any(ip.startswith(("192.168.", "10.", "172.")) for ip, _ in destinations)
-        advertised_ip = local_ip if is_on_lan else public_ip
-
-        sdp_answer = (
-            "v=0\r\n"
-            f"o=tars 123456 123456 IN IP4 {advertised_ip}\r\n"
-            "s=TARS Sentinel\r\n"
-            f"c=IN IP4 {advertised_ip}\r\n"
-            "t=0 0\r\n"
-            f"m=audio {local_rtp_port} RTP/AVP 0 8 101\r\n"
-            "a=rtpmap:0 PCMU/8000\r\n"
-            "a=rtpmap:8 PCMA/8000\r\n"
-            "a=rtpmap:101 telephone-event/8000\r\n"
-            "a=fmtp:101 0-15\r\n"
-            "a=sendrecv\r\n"
-            "a=rtcp-mux\r\n"
-        )
-
         route_hdr = ""
         if routes:
             route_hdr = "Route: " + ", ".join(routes) + "\r\n"
@@ -750,11 +796,14 @@ def _trigger_urgent_call_impl(
             f"CSeq: 2 ACK\r\n"
             "Max-Forwards: 70\r\n"
             f"User-Agent: {CALLER_DISPLAY}\r\n"
-            "Content-Type: application/sdp\r\n"
-            f"Content-Length: {len(sdp_answer)}\r\n\r\n"
-            f"{sdp_answer}"
+            "Content-Length: 0\r\n\r\n"
         )
         sip_sock.sendto(ack2.encode(), (server, server_port))
+        if resp_addr and resp_addr != (server, server_port):
+            try:
+                sip_sock.sendto(ack2.encode(), resp_addr)
+            except Exception:
+                pass
 
         if routes:
             m_route = re.search(r'sips?:([^:;>]+)(?::(\d+))?', routes[0])
@@ -1354,20 +1403,7 @@ def run_inbound_sip_server(port=5060):
                 rtp_sock.bind(("0.0.0.0", 0))
                 local_rtp_port = rtp_sock.getsockname()[1]
 
-                sdp_answer = (
-                    "v=0\r\n"
-                    f"o=tars 123456 123456 IN IP4 {advertised_ip}\r\n"
-                    "s=TARS Sentinel\r\n"
-                    f"c=IN IP4 {advertised_ip}\r\n"
-                    "t=0 0\r\n"
-                    f"m=audio {local_rtp_port} RTP/AVP 0 8 101\r\n"
-                    "a=rtpmap:0 PCMU/8000\r\n"
-                    "a=rtpmap:8 PCMA/8000\r\n"
-                    "a=rtpmap:101 telephone-event/8000\r\n"
-                    "a=fmtp:101 0-15\r\n"
-                    "a=sendrecv\r\n"
-                    "a=rtcp-mux\r\n"
-                )
+                sdp_answer = build_sdp_answer(sdp_part, local_ip, public_ip, local_rtp_port, is_lan=is_on_lan)
 
                 resp_200 = (
                     "SIP/2.0 200 OK\r\n"
@@ -1377,7 +1413,7 @@ def run_inbound_sip_server(port=5060):
                     f"Call-ID: {call_id}\r\n"
                     f"CSeq: {cseq}\r\n"
                     f"{route_headers_str}"
-                    f"Contact: <sip:{username}@{advertised_ip}:{port};transport=UDP>\r\n"
+                    f"Contact: <sip:{username}@{public_ip}:{port};transport=UDP>\r\n"
                     f"User-Agent: {CALLER_DISPLAY}\r\n"
                     "Content-Type: application/sdp\r\n"
                     f"Content-Length: {len(sdp_answer)}\r\n\r\n"
