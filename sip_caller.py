@@ -412,18 +412,23 @@ def record_user_speech(rtp_sock, max_seconds=7.0, silence_timeout=0.8, player=No
     dtmf_digit = None
     start_time = time.time()
     
+    pkt_cnt = 0
     while time.time() - start_time < max_seconds:
         try:
             data, sender_addr = rtp_sock.recvfrom(2048)
             if len(data) < 12:
                 continue
             
+            pkt_cnt += 1
+            byte0, byte1, seq, ts, ssrc = struct.unpack("!BBHII", data[:12])
+            pt = byte1 & 0x7F
+
+            if pkt_cnt == 1:
+                print(f"📦 First RTP audio packet received from {sender_addr}: len={len(data)}, pt={pt}")
+
             # Symmetric RTP: ensure response packets route to actual transmitting endpoint
             if player and sender_addr and (not player.destinations or sender_addr != player.destinations[0]):
                 player.destinations = [sender_addr]
-            
-            byte0, byte1, seq, ts, ssrc = struct.unpack("!BBHII", data[:12])
-            pt = byte1 & 0x7F
             
             cc = byte0 & 0x0F
             header_len = 12 + (cc * 4)
@@ -458,13 +463,15 @@ def record_user_speech(rtp_sock, max_seconds=7.0, silence_timeout=0.8, player=No
                 frames.append(linear)
                 rms = audioop.rms(linear, 2)
                 
-                if rms > 320:
+                if rms > 280:
                     if not speech_detected:
                         speech_detected = True
+                        print(f"🎙️ User speech detected on microphone (rms={rms})")
                     last_speech_time = time.time()
                 
                 # Rapid silence detection (0.8s) for snappy Jarvis pacing
                 if speech_detected and (time.time() - last_speech_time > silence_timeout) and len(frames) > 12:
+                    print(f"⏹️ Speech pause detected after {len(frames)*0.02:.1f}s")
                     break
 
         except socket.timeout:
@@ -473,7 +480,9 @@ def record_user_speech(rtp_sock, max_seconds=7.0, silence_timeout=0.8, player=No
             continue
             
     pcm_bytes = b"".join(frames)
+    print(f"📊 Audio segment captured: {len(frames)} frames ({len(frames)*0.02:.2f}s, {len(pcm_bytes)} bytes, {pkt_cnt} RTP pkts)")
     return pcm_bytes, dtmf_digit
+
 
 
 
@@ -622,6 +631,21 @@ def _trigger_urgent_call_impl(
         opaque=challenge["opaque"]
     )
 
+    sdp_offer = (
+        "v=0\r\n"
+        f"o=tars 123456 123456 IN IP4 {public_ip}\r\n"
+        "s=TARS Sentinel\r\n"
+        f"c=IN IP4 {public_ip}\r\n"
+        "t=0 0\r\n"
+        f"m=audio {local_rtp_port} RTP/AVP 0 8 101\r\n"
+        "a=rtpmap:0 PCMU/8000\r\n"
+        "a=rtpmap:8 PCMA/8000\r\n"
+        "a=rtpmap:101 telephone-event/8000\r\n"
+        f"a=candidate:1 1 UDP 2130706431 {local_ip} {local_rtp_port} typ host\r\n"
+        f"a=candidate:2 1 UDP 1694498815 {public_ip} {local_rtp_port} typ srflx\r\n"
+        "a=sendrecv\r\n"
+    )
+
     branch2 = "z9hG4bK" + uuid.uuid4().hex[:20]
     invite2 = (
         f"INVITE {target_sip_uri} SIP/2.0\r\n"
@@ -634,10 +658,12 @@ def _trigger_urgent_call_impl(
         f"{auth_req_name}: {auth_val}\r\n"
         "Max-Forwards: 70\r\n"
         f"User-Agent: {CALLER_DISPLAY}\r\n"
-        "Content-Length: 0\r\n\r\n"
+        "Content-Type: application/sdp\r\n"
+        f"Content-Length: {len(sdp_offer)}\r\n\r\n"
+        f"{sdp_offer}"
     )
 
-    print("🔐 Authenticating with Flexisip server...")
+    print("🔐 Authenticating with Flexisip server (Early Offer PCMU/PCMA)...")
     sip_sock.sendto(invite2.encode(), (server, server_port))
 
     ringing_detected = False
@@ -688,23 +714,6 @@ def _trigger_urgent_call_impl(
         destinations = select_best_rtp_destination(callee_sdp)
         print(f"Target RTP Audio Destination: {destinations}")
 
-        is_on_lan = any(ip.startswith(("192.168.", "10.", "172.")) for ip, _ in destinations)
-        advertised_ip = local_ip if is_on_lan else public_ip
-
-        sdp_offer = (
-            "v=0\r\n"
-            f"o=tars 123456 123456 IN IP4 {advertised_ip}\r\n"
-            "s=TARS Sentinel\r\n"
-            f"c=IN IP4 {advertised_ip}\r\n"
-            "t=0 0\r\n"
-            f"m=audio {local_rtp_port} RTP/AVP 0 8 101\r\n"
-            "a=rtpmap:0 PCMU/8000\r\n"
-            "a=rtpmap:8 PCMA/8000\r\n"
-            "a=rtpmap:101 telephone-event/8000\r\n"
-            f"a=candidate:1 1 UDP 2130706431 {local_ip} {local_rtp_port} typ host\r\n"
-            f"a=candidate:2 1 UDP 1694498815 {public_ip} {local_rtp_port} typ srflx\r\n"
-            "a=sendrecv\r\n"
-        )
         route_hdr = ""
         if routes:
             route_hdr = "Route: " + ", ".join(routes) + "\r\n"
@@ -720,11 +729,10 @@ def _trigger_urgent_call_impl(
             f"CSeq: 2 ACK\r\n"
             "Max-Forwards: 70\r\n"
             f"User-Agent: {CALLER_DISPLAY}\r\n"
-            "Content-Type: application/sdp\r\n"
-            f"Content-Length: {len(sdp_offer)}\r\n\r\n"
-            f"{sdp_offer}"
+            "Content-Length: 0\r\n\r\n"
         )
         sip_sock.sendto(ack2.encode(), (server, server_port))
+
         if routes:
             m_route = re.search(r'sips?:([^:;>]+)(?::(\d+))?', routes[0])
             if m_route:

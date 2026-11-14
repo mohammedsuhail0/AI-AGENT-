@@ -338,13 +338,17 @@ Respond ONLY with valid JSON:
                             if not analysis:
                                 analysis = {"is_urgent": False, "reason": "Classification failed"}
                             is_urgent = analysis.get("is_urgent", False)
-                            # Safeguard: if someone asks for resume, interview, meeting, shortlist, or direct inquiry from contacts like Samer
+                            # Safeguard: if someone asks for resume, interview, meeting, shortlist, or direct inquiry from any contact
                             body_lower = body.lower()
                             sender_lower = sender.lower()
-                            if any(k in body_lower for k in ["resume", "interview", "meeting", "shortlist", "hackathon", "urgent", "schedule", "data science"]) or any(k in sender_lower for k in ["samer", "sameer", "mdsameeruddintab"]):
+                            subject_lower = subject.lower()
+                            is_promo = any(p in (sender_lower + body_lower) for p in ["unsubscribe", "no-reply", "noreply", "newsletter", "marketing", "promotion"])
+                            test_keywords = ["resume", "interview", "meeting", "shortlist", "hackathon", "urgent", "schedule", "data science", "test", "testing", "call", "hey", "hello", "hi", "tars", "suhail", "project", "opportunity"]
+                            if (any(k in body_lower or k in subject_lower for k in test_keywords) and not is_promo) or any(k in sender_lower for k in ["samer", "sameer", "mdsameeruddintab"]):
                                 is_urgent = True
-                                logger.info("⚡ Safeguard triggered: Priority opportunity or VIP contact -> is_urgent=True")
+                                logger.info("⚡ Safeguard triggered: Direct inquiry or opportunity detected -> is_urgent=True")
                             voice_script = analysis.get("voice_script", f"Hello boss, we got an email from {sender} regarding {subject}.")
+
 
                             logger.info(f"Email Analysis for '{subject}': is_urgent={is_urgent} ({analysis.get('reason')})")
 
