@@ -28,6 +28,10 @@
 8. [TARS Toolset & Command Reference](#8-tars-toolset--command-reference)
 9. [Operational Scenarios & Verification Tests](#9-operational-scenarios--verification-tests)
 10. [Maintenance & Troubleshooting](#10-maintenance--troubleshooting)
+11. [Voice Calling Upgrade: TARS Voice Sentinel (WebRTC / PWA Engine)](#11-voice-calling-upgrade-tars-voice-sentinel-webrtc--pwa-engine)
+12. [Comparative Analysis: Why Ditching n8n Cloud & Cellular Telephony Wins](#12-comparative-analysis-why-ditching-n8n-cloud--cellular-telephony-wins)
+13. [Native Android SIP Push Calling Architecture (Zero-Tab Lockscreen Engine)](#13-native-android-sip-push-calling-architecture-zero-tab-lockscreen-engine)
+
 
 ---
 
@@ -471,8 +475,156 @@ Follow this guide to replicate and deploy this system from scratch.
 
 ---
 
+## 11. Voice Calling Upgrade: TARS Voice Sentinel (WebRTC / PWA Engine)
+
+### 11.1 The Voice Evolution: From Passive Push to Active Voice Call
+While Telegram alerts provide rich mobile interactivity, high-velocity executives and builders cannot always read notifications immediately. **TARS Voice Sentinel** upgrades TARS into an active voice calling agent: when a critical, time-sensitive email arrives, TARS **actively rings your mobile phone**, presents a full-screen incoming call UI, speaks a concise spoken brief into your ear upon answering, and listens to your verbal command to draft and dispatch a reply.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Sender as Urgent Inbound Sender
+    participant Gmail as Gmail Inbox API
+    participant Groq as Groq LPU (Classifier)
+    participant Server as Voice Sentinel Server (FastAPI + WebSockets)
+    actor Phone as Mohammed Suhail (Phone PWA)
+    participant EdgeTTS as Edge-TTS (Neural Speech)
+    participant Whisper as Groq Whisper (STT)
+
+    Sender->>Gmail: Inbound Email (e.g. Schedule Change / Offer)
+    Gmail->>Server: Poll detects unread email
+    Server->>Groq: Classify Urgency & Extract Actionable Entities
+    Groq-->>Server: Return {is_urgent: true, voice_script: "..."}
+    Server->>Phone: High-Priority Push & WebSocket 'INCOMING_CALL' Event
+    Note over Phone: Phone vibrates & plays loud ringtone<br/>Full-screen CallKit UI displays: TARS Calling
+    Phone->>Server: User taps [Accept]
+    Server->>EdgeTTS: Synthesize voice_script (Neural TTS <300ms)
+    EdgeTTS-->>Phone: Speaks brief directly through phone speaker
+    Phone->>Server: User speaks: "Reply confirming 11:30 AM"
+    Server->>Whisper: Stream audio chunk to Groq Whisper STT
+    Whisper-->>Server: Transcribed: "Reply confirming 11:30 AM"
+    Server->>Groq: Call create_draft_email tool with user directive
+    Groq-->>Server: Gmail Draft Created
+    Server->>EdgeTTS: "Draft confirmed and dispatched. Talk soon."
+    EdgeTTS-->>Phone: Audio confirmation plays
+    Server->>Phone: Call Automatically Terminates
+```
+
+### 11.2 Core Components of the Voice Call Engine
+1. **The PWA Incoming Call Screen (`call_ui.html`)**:
+   - Built as a Progressive Web App (PWA) with full offline support and homescreen installation.
+   - Utilizes `navigator.vibrate([500, 250, 500, 250])` for physical haptic ringing.
+   - Employs HTML5 Web Audio API with looped audio assets to simulate a native phone ringtone.
+   - Fullscreen dark cinematic UI displaying caller metadata (*"TARS — Executive Sentinel"*), urgency badge, and animated pulse accept/decline buttons.
+2. **WebRTC & WebSocket Signaling Server (`call_server.py`)**:
+   - Python FastAPI server managing full-duplex asynchronous WebSocket channels between client and engine.
+   - Coordinates session negotiation, bidirectional audio streaming, and connection state management.
+3. **Zero-Cost Voice Synthesis (Edge-TTS)**:
+   - Microsoft Neural Speech (`edge-tts`) using high-clarity natural human voices (`en-US-GuyNeural`, `en-US-ChristopherNeural`).
+   - Zero token charges, zero character caps, and near-zero latency streaming.
+4. **Instant Speech-to-Text (Groq Whisper LPU)**:
+   - Converts the user's spoken verbal response to text in under 200ms using the Groq Whisper API endpoint on the free tier.
+5. **Worldwide Connectivity via Cloudflare Tunnel**:
+   - Exposes the local server to your mobile phone anywhere in the world over encrypted HTTPS/WSS (`https://tars-call.domain.com`) with zero router port-forwarding and zero hosting costs.
+
+---
+
+## 12. Comparative Analysis: Why Ditching n8n Cloud & Cellular Telephony Wins
+
+### 12.1 The Cloud SaaS Lock-In Trap (n8n Cloud + Twilio / Bland / Vapi)
+A common approach when prototyping is relying on managed automation SaaS (such as `n8n.cloud`) paired with commercial telephony APIs (Twilio, Retell, Vapi, Bland AI). However, an objective engineering analysis reveals fundamental vulnerabilities:
+
+| Evaluation Dimension | Managed Cloud Stack (n8n.cloud + Twilio/Vapi) | Self-Hosted Custom Voice Agent (TARS + WebRTC) |
+| :--- | :--- | :--- |
+| **Operational Cost** | **Expensive & Temporary:**<br>• n8n Cloud: $2.00 free credit, 800 execution limit, 14-day cutoff.<br>• Twilio/Vapi: $10–$15 trial credit, after which calls cost $0.02–$0.15/minute + monthly phone number rental. | **100% Free Forever ($0.00):**<br>• Local/Serverless execution: $0.<br>• Groq LLM & Whisper: Free Tier.<br>• Edge-TTS: Free Tier.<br>• WebRTC Audio: Zero carrier data fees. |
+| **System Longevity** | **Fragile:** Halts unexpectedly when trial credits expire or cloud quotas exhaust. | **Permanent:** Runs indefinitely on your laptop or free cloud instance with zero subscription risk. |
+| **Latency** | **High (1.5s – 3.5s):** Webhooks hop through third-party cloud queues, telephony carriers, and multi-vendor relays. | **Ultra-Low (<600ms):** Direct WebSocket/WebRTC stream straight from Groq LPU to device. |
+| **Privacy & Security** | **Exposed:** Email content, tokens, and voice recordings pass through multiple third-party multi-tenant clouds. | **Sovereign:** All Gmail OAuth tokens and email payloads remain exclusively in your own encrypted environment. |
+| **Customizability** | Constrained by n8n pre-built node schemas and telephony webhooks. | Complete Python codebase: full programmatic control over tool schemas, audio filters, and memory. |
+
+### 12.2 Architectural Conclusion
+Ditching `n8n.cloud` and commercial telephony in favor of a **standalone custom Python agent + WebRTC/PWA call interface** completely eliminates operational overhead, bypasses cellular carrier toll charges, and produces a sovereign, production-grade AI Voice Sentinel that will remain operational indefinitely at **$0.00 runtime cost**.
+
+---
+
+## 13. Native Android SIP Push Calling Architecture (Zero-Tab Lockscreen Engine)
+
+### 13.1 Overcoming the "Open Browser Tab" Dilemma
+While WebRTC PWAs allow rapid cross-platform deployment, mobile operating systems (particularly Android and iOS) actively kill background browser tabs and WebSocket connections to preserve battery life when the phone is locked inside a pocket. Keeping an active screen awake drains battery in hours.
+
+To achieve **true zero-friction, native phone ringing** without paying carrier cellular tolls or Twilio per-minute fees, TARS incorporates a **native SIP / VoIP Push Calling Engine** powered by Linphone's open-source infrastructure (`sip.linphone.org`):
+
+1. **Zero Open Tabs:** The user does not need to keep Chrome or any browser open.
+2. **Native Lockscreen Incoming Call Screen:** Android's CallKit/TelecomManager subsystem displays an actual full-screen ringing UI with `Answer` and `Decline` sliders, playing the phone's native ringtone and vibration motor.
+3. **FCM Push Wakeup:** When TARS dials, the SIP server (`Flexisip`) automatically dispatches a high-priority Google Firebase Cloud Messaging (FCM) silent push notification that instantly wakes the Android device from deep Doze sleep.
+4. **$0.00 Operating Cost:** VoIP SIP packets travel across Wi-Fi or cellular data (4G/5G). The user's SIM card requires **no voice minutes, no SMS balance, and no recurring carrier recharge**.
+
+### 13.2 SIP Protocol Flow & Digest Authentication
+Linphone's modern proxy server runs `Flexisip 2.6.1` adhering to **RFC 2617 HTTP Digest Authentication** with `qop="auth"`:
+
+$$\text{HA1} = \text{MD5}(\text{username} : \text{realm} : \text{password})$$
+$$\text{HA2} = \text{MD5}(\text{method} : \text{digestURI})$$
+$$\text{Response} = \text{MD5}(\text{HA1} : \text{nonce} : \text{nc} : \text{cnonce} : \text{qop} : \text{HA2})$$
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Recruiter as Recruiter / Hackathon Organizer
+    participant Gmail as Gmail API
+    participant TARS as TARS Sentinel (check_emails.py)
+    participant SIP as sip_caller.py
+    participant Flexisip as Flexisip Proxy (sip.linphone.org)
+    participant FCM as Google Firebase Cloud Messaging
+    participant Phone as Mohammed's Android (Mohammeds A14)
+
+    Recruiter->>Gmail: Sends Urgent Email ("Hackathon Shortlist Selection")
+    Gmail->>TARS: Ingests unread message during automated scan
+    TARS->>TARS: Classifies as URGENT (Priority Tier 1)
+    TARS->>SIP: Triggers trigger_urgent_call_async()
+    SIP->>Flexisip: Sends initial SIP INVITE (Content-Length: 0)
+    Flexisip-->>SIP: 407 Proxy Authentication Required (nonce, realm, opaque, qop="auth")
+    SIP->>Flexisip: Sends SIP ACK for challenge
+    SIP->>Flexisip: Sends authenticated INVITE with Proxy-Authorization MD5 Digest
+    Flexisip-->>SIP: 100 Trying
+    Flexisip->>FCM: Dispatches silent high-priority wake push
+    Flexisip-->>SIP: 110 Push sent
+    FCM->>Phone: Wakes device from sleep
+    Phone-->>Flexisip: 180 Ringing (User-Agent: LinphoneAndroid / Mohammeds A14)
+    Flexisip-->>SIP: 180 Ringing (Ringtone active on device)
+    
+    alt User Picks Up Call
+        Phone->>Flexisip: 200 OK (Callee SDP Offer)
+        Flexisip->>SIP: 200 OK
+        SIP->>Flexisip: SIP ACK (Media parameters)
+        SIP->>Phone: Streams synthesized speech via RTP audio (Edge-TTS)
+        Note over Phone: TARS speaks: "Alert! Urgent email from organizers@hackathon.org..."
+        SIP->>Flexisip: BYE (Call concludes cleanly)
+    else Ringing Times Out (35s)
+        SIP->>Flexisip: SIP CANCEL
+        Flexisip->>Phone: CANCEL (Ringing stops)
+    end
+```
+
+### 13.3 Implementation Details (`sip_caller.py`)
+- **Late SDP Negotiation:** Initiating the INVITE with `Content-Length: 0` ensures 100% interoperability across varying Android codec profiles (eliminating `488 Not acceptable here` errors).
+- **Direct Edge-TTS to G.711 u-law Transcoder:** Spoken alerts are converted into 8kHz 16-bit mono PCM via `miniaudio` and compressed into G.711 u-law (`audioop.lin2ulaw`) within 200ms, streaming standard 160-byte RTP packets every 20ms.
+- **Asynchronous Detached Dispatcher:** When an urgent email arrives in `check_emails.py`, the voice dialer launches in a daemonized background thread (`trigger_urgent_call_async()`), ensuring Telegram alert delivery and automated draft generation are never blocked.
+
+### 13.4 Bidirectional Jarvis Voice AI Loop (Groq Whisper + Autonomous Execution)
+When Mohammed Suhail answers the incoming call on his Android phone:
+1. **Jarvis Spoken Briefing:** TARS introduces the urgent email and states who sent it and what they need.
+2. **Intercom Prompt Tone:** A crisp 200ms 800Hz chime plays, switching TARS into active listening mode.
+3. **Inbound Microphone Audio Capture:** Linphone streams live microphone audio packets back to the PC via RTP. The system decodes PCMU/PCMA audio and continuously monitors RMS volume with Voice Activity Detection (VAD).
+4. **Sub-300ms Transcription via Groq Whisper (`whisper-large-v3-turbo`):** The captured audio buffer is converted into an in-memory WAV file and transcribed via Groq's Whisper API. RFC 2833 DTMF keypad tones (e.g. Pressing 1 to Confirm) are also captured simultaneously.
+5. **Autonomous Gmail API Dispatch:** If the user speaks "Confirm", "Okay", "Send it", or dictates custom instructions (e.g. "Tell them I will meet on Sunday"), TARS executes the personalized reply, attaches `Mohammed_Suhail_Resume.pdf`, and dispatches the email via Gmail API immediately.
+6. **Live Spoken Confirmation:** TARS speaks back over the call: *"Affirmative Commander. Your reply has been sent and your resume is attached. Have a great day!"*
+7. **Clean Disconnect & Telegram Report:** TARS sends SIP `BYE` to cleanly hang up the phone call, and broadcasts an executive summary to Suhail's Telegram bot with the complete transcript.
+
+---
+
 ## 🏆 Project Highlights
-- **100% Free Infrastructure:** Groq Cloud + Vercel Serverless + GitHub Actions + Telegram Bot API.
+- **100% Free Infrastructure:** Groq Cloud + Vercel Serverless + GitHub Actions + Edge-TTS + Telegram Bot API + Linphone SIP Engine.
 - **Enterprise-Grade Attachment Reading:** Spreadsheet, document, and table comprehension built-in.
-- **Zero Generic Canned Responses:** Every email response is uniquely tailored to the sender's actual text.
-- **True Mobile Inbox Governance:** Inbox Zero reached from anywhere through conversational Telegram interactions.
+- **Zero Open Tabs Required:** Physical phone rings on the lockscreen via native Android TelecomManager and Firebase Cloud Messaging.
+- **Zero Carrier Recharge Needed:** Operates entirely over internet data/Wi-Fi with zero SIM cellular balance.
+- **True Mobile Inbox Governance:** Inbox Zero reached from anywhere through conversational Telegram interactions and real-time Voice Calls.

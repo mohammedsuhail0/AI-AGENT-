@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>TARS Voice Sentinel</title>
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#030712">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body {
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      background-color: #030712;
+      color: #f3f4f6;
+      -webkit-tap-highlight-color: transparent;
+      touch-action: manipulation;
+    }
+    .font-mono { font-family: 'JetBrains Mono', monospace; }
+
+    @keyframes radar-pulse {
+      0% { transform: scale(0.9); opacity: 0.8; }
+      50% { transform: scale(1.3); opacity: 0.2; }
+      100% { transform: scale(1.6); opacity: 0; }
+    }
+    .animate-radar { animation: radar-pulse 2.4s cubic-bezier(0.2, 0.8, 0.2, 1) infinite; }
+    .animate-radar-delayed { animation: radar-pulse 2.4s cubic-bezier(0.2, 0.8, 0.2, 1) infinite 0.8s; }
+
+    @keyframes call-ring {
+      0%, 100% { transform: rotate(0deg); }
+      15% { transform: rotate(14deg); }
+      30% { transform: rotate(-14deg); }
+      45% { transform: rotate(10deg); }
+      60% { transform: rotate(-10deg); }
+      75% { transform: rotate(4deg); }
+    }
+    .animate-ring { animation: call-ring 1s ease-in-out infinite; }
+
+    /* Custom Glass Panel */
+    .glass-panel {
+      background: rgba(17, 24, 39, 0.7);
+      backdrop-filter: blur(16px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+  </style>
+</head>
+<body class="h-screen w-screen overflow-hidden flex flex-col justify-between selection:bg-cyan-500/20">
+
+  <!-- ==================== 1. STANDBY RADAR SCREEN ==================== -->
+  <div id="screen-standby" class="flex-1 flex flex-col justify-between p-6 max-w-md mx-auto w-full transition-all duration-500">
+    <!-- Top Header -->
+    <div class="flex items-center justify-between pt-2">
+      <div class="flex items-center space-x-2.5">
+        <div class="w-3 h-3 rounded-full bg-emerald-500 animate-pulse shadow-lg shadow-emerald-500/50"></div>
+        <span class="text-xs font-mono tracking-widest uppercase text-emerald-400 font-semibold">TARS Sentinel Online</span>
+      </div>
+      <div class="text-[11px] font-mono px-2 py-0.5 rounded bg-gray-800 text-gray-400 border border-gray-700">
+        Gmail Poller: 60s
+      </div>
+    </div>
+
+    <!-- Center Radar Visualizer -->
+    <div class="flex flex-col items-center justify-center my-auto text-center relative py-12">
+      <div class="absolute w-48 h-48 rounded-full border border-cyan-500/30 animate-radar pointer-events-none"></div>
+      <div class="absolute w-48 h-48 rounded-full border border-cyan-500/20 animate-radar-delayed pointer-events-none"></div>
+      
+      <div class="w-28 h-28 rounded-full bg-gradient-to-tr from-gray-900 to-gray-800 border-2 border-cyan-500/40 shadow-2xl shadow-cyan-500/20 flex flex-col items-center justify-center relative z-10">
+        <svg class="w-10 h-10 text-cyan-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+        </svg>
+        <span class="text-[10px] font-mono tracking-widest text-cyan-400 font-semibold mt-1">SENTINEL</span>
+      </div>
+
+      <h1 class="text-xl font-bold text-white mt-8 tracking-tight">Guarding Your Inbox</h1>
+      <p class="text-xs text-gray-400 max-w-xs mt-2 leading-relaxed">
+        Autonomous voice agent is listening for high-priority emails. When an urgent matter arrives, this phone will ring immediately.
+      </p>
+
+      <div id="connection-status" class="mt-6 flex items-center space-x-2 text-xs text-gray-400 font-mono">
+        <span class="w-2 h-2 rounded-full bg-yellow-500"></span>
+        <span>Connecting WebSocket...</span>
+      </div>
+    </div>
+
+    <!-- Bottom Controls & Test Buttons -->
+    <div class="space-y-3 pb-6">
+      <button onclick="requestMicrophonePermission()" id="btn-mic-perm" class="w-full py-3 px-4 rounded-xl glass-panel text-xs font-medium text-gray-300 hover:text-white flex items-center justify-center space-x-2 border border-gray-700/60 active:scale-95 transition-transform">
+        <svg class="w-4 h-4 text-cyan-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+        </svg>
+        <span>Enable Mobile Mic & Audio</span>
+      </button>
+
+      <button onclick="triggerTestCall()" class="w-full py-3.5 px-4 rounded-xl bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-semibold text-sm shadow-lg shadow-cyan-600/30 flex items-center justify-center space-x-2 active:scale-95 transition-all">
+        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
+        </svg>
+        <span>⚡ Test Urgent Call Now</span>
+      </button>
+    </div>
+  </div>
+
+
+  <!-- ==================== 2. FULLSCREEN INCOMING CALL SCREEN ==================== -->
+  <div id="screen-incoming" class="fixed inset-0 bg-gradient-to-b from-gray-950 via-gray-900 to-gray-950 z-50 hidden flex-col justify-between p-8 text-center select-none">
+    
+    <!-- Incoming Call Header -->
+    <div class="pt-8">
+      <div class="inline-flex items-center space-x-2 px-3 py-1 rounded-full bg-red-500/20 border border-red-500/40 text-red-400 text-xs font-mono uppercase tracking-widest font-bold animate-pulse">
+        <span>🚨 Urgent Email Alert</span>
+      </div>
+      <h2 class="text-3xl font-extrabold text-white mt-4 tracking-tight">TARS Sentinel</h2>
+      <p class="text-sm font-mono text-cyan-400 mt-1">Executive AI Voice Bridge</p>
+    </div>
+
+    <!-- Center Call Avatar & Details -->
+    <div class="my-auto flex flex-col items-center">
+      <div class="relative flex items-center justify-center">
+        <div class="w-40 h-40 rounded-full border border-cyan-400/40 animate-radar absolute"></div>
+        <div class="w-32 h-32 rounded-full bg-gray-900 border-2 border-cyan-400/80 shadow-2xl shadow-cyan-500/40 flex items-center justify-center text-4xl">
+          🤖
+        </div>
+      </div>
+
+      <!-- Email Intel Box -->
+      <div class="mt-8 p-4 rounded-2xl glass-panel max-w-xs w-full text-left border border-white/10 shadow-xl">
+        <p class="text-[10px] font-mono text-gray-400 uppercase tracking-wider">From:</p>
+        <p id="call-sender" class="text-xs font-bold text-white truncate">Dean of Academics</p>
+        
+        <p class="text-[10px] font-mono text-gray-400 uppercase tracking-wider mt-2">Subject:</p>
+        <p id="call-subject" class="text-xs font-medium text-gray-200 line-clamp-2">Urgent: Tomorrow's Schedule Confirmation</p>
+      </div>
+    </div>
+
+    <!-- Call Control Buttons -->
+    <div class="pb-8 w-full max-w-xs mx-auto flex items-center justify-between">
+      <!-- Decline Button -->
+      <button onclick="declineCall()" class="flex flex-col items-center group">
+        <div class="w-16 h-16 rounded-full bg-rose-600/90 hover:bg-rose-500 text-white flex items-center justify-center shadow-lg shadow-rose-600/50 active:scale-90 transition-all">
+          <svg class="w-7 h-7 rotate-[135deg]" fill="currentColor" viewBox="0 0 24 24">
+            <path d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z"/>
+          </svg>
+        </div>
+        <span class="text-xs text-gray-400 mt-2 font-medium">Decline</span>
+      </button>
+
+      <!-- Accept Button -->
+      <button onclick="acceptCall()" class="flex flex-col items-center group">
+        <div class="w-16 h-16 rounded-full bg-emerald-500 hover:bg-emerald-400 text-white flex items-center justify-center shadow-lg shadow-emerald-500/60 animate-ring active:scale-90 transition-all">
+          <svg class="w-7 h-7" fill="currentColor" viewBox="0 0 24 24">
+            <path d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z"/>
+          </svg>
+        </div>
+        <span class="text-xs text-emerald-400 font-bold mt-2">Answer</span>
+      </button>
+    </div>
+  </div>
+
+
+  <!-- ==================== 3. ACTIVE VOICE CALL HUD ==================== -->
+  <div id="screen-active" class="fixed inset-0 bg-gradient-to-b from-gray-950 via-gray-900 to-gray-950 z-50 hidden flex-col justify-between p-6">
+    
+    <!-- Top HUD Bar -->
+    <div class="flex items-center justify-between border-b border-gray-800/80 pb-3">
+      <div>
+        <p class="text-xs font-mono text-cyan-400 uppercase tracking-widest">TARS VOICE HUD</p>
+        <h3 id="active-sender-title" class="text-sm font-bold text-white truncate max-w-[200px]">Active Call</h3>
+      </div>
+      <div class="flex items-center space-x-2">
+        <span class="w-2.5 h-2.5 rounded-full bg-red-500 animate-pulse"></span>
+        <span id="call-timer" class="font-mono text-sm text-gray-300 font-semibold">00:00</span>
+      </div>
+    </div>
+
+    <!-- Center Waveform & Status Indicator -->
+    <div class="my-auto flex flex-col items-center justify-center text-center">
+      <!-- Live Status Badge -->
+      <div id="status-pill" class="px-3.5 py-1.5 rounded-full bg-cyan-950 border border-cyan-500/40 text-cyan-300 text-xs font-mono flex items-center space-x-2 shadow-lg">
+        <span class="w-2 h-2 rounded-full bg-cyan-400 animate-ping"></span>
+        <span id="status-text">TARS Speaking Brief...</span>
+      </div>
+
+      <!-- Audio Visualizer Canvas -->
+      <canvas id="visualizer-canvas" class="w-64 h-24 my-6" width="300" height="100"></canvas>
+
+      <!-- Live Dialogue Box -->
+      <div class="w-full max-w-sm glass-panel p-4 rounded-2xl max-h-48 overflow-y-auto space-y-3 text-left border border-white/5 shadow-inner" id="transcript-container">
+        <div id="dialogue-box" class="space-y-2 text-xs leading-relaxed">
+          <p class="text-cyan-400"><strong class="font-mono">TARS:</strong> Initializing live voice link...</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Bottom Controls -->
+    <div class="pb-6 w-full max-w-xs mx-auto flex items-center justify-center space-x-6">
+      <!-- Mic Mute Toggle -->
+      <button onclick="toggleMute()" id="btn-mute" class="w-14 h-14 rounded-full glass-panel border border-white/10 text-gray-300 flex items-center justify-center active:scale-95 transition-transform">
+        <svg id="icon-mic" class="w-6 h-6 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+        </svg>
+      </button>
+
+      <!-- End Call Button -->
+      <button onclick="endCall()" class="w-16 h-16 rounded-full bg-rose-600 hover:bg-rose-500 text-white flex items-center justify-center shadow-lg shadow-rose-600/50 active:scale-90 transition-transform">
+        <svg class="w-7 h-7 rotate-[135deg]" fill="currentColor" viewBox="0 0 24 24">
+          <path d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+
+
+  <!-- ==================== JAVASCRIPT CORE ==================== -->
+  <script>
+    let ws = null;
+    let audioContext = null;
+    let ringtoneOscillator = null;
+    let ringtoneGain = null;
+    let ringInterval = null;
+    let callTimerInterval = null;
+    let callSeconds = 0;
+    let isCallActive = false;
+    let isMuted = false;
+    let mediaRecorder = null;
+    let audioChunks = [];
+    let currentEmailData = null;
+
+    // Connect to WebSocket
+    function connectWebSocket() {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${protocol}//${window.location.host}/ws/call`;
+      ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        document.getElementById('connection-status').innerHTML = `
+          <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
+          <span class="text-emerald-400">Connected to Voice Sentinel</span>
+        `;
+      };
+
+      ws.onmessage = async (event) => {
+        const data = JSON.parse(event.data);
+        console.log('WS Message:', data);
+
+        if (data.type === 'INCOMING_CALL') {
+          triggerIncomingCallUI(data);
+        } else if (data.type === 'AUDIO_RESPONSE') {
+          playAgentAudio(data.audio_base64, data.text);
+        } else if (data.type === 'STATUS_UPDATE') {
+          updateStatusText(data.status);
+        } else if (data.type === 'END_CALL') {
+          endCall();
+        }
+      };
+
+      ws.onclose = () => {
+        document.getElementById('connection-status').innerHTML = `
+          <span class="w-2 h-2 rounded-full bg-rose-500"></span>
+          <span class="text-rose-400">Disconnected. Reconnecting...</span>
+        `;
+        setTimeout(connectWebSocket, 3000);
+      };
+    }
+
+    // Web Audio Synthesized High-Tech Ringtone (Zero external audio file dependency)
+    function startRingtone() {
+      if (!audioContext) {
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      if (audioContext.state === 'suspended') {
+        audioContext.resume();
+      }
+
+      function playChime() {
+        if (!document.getElementById('screen-incoming').classList.contains('hidden')) {
+          const now = audioContext.currentTime;
+          const osc1 = audioContext.createOscillator();
+          const osc2 = audioContext.createOscillator();
+          const gainNode = audioContext.createGain();
+
+          osc1.type = 'sine';
+          osc2.type = 'sine';
+          osc1.frequency.setValueAtTime(853, now); // Marimba dual-tone high frequency
+          osc2.frequency.setValueAtTime(960, now);
+
+          gainNode.gain.setValueAtTime(0, now);
+          gainNode.gain.linearRampToValueAtTime(0.3, now + 0.05);
+          gainNode.gain.exponentialRampToValueAtTime(0.001, now + 1.2);
+
+          osc1.connect(gainNode);
+          osc2.connect(gainNode);
+          gainNode.connect(audioContext.destination);
+
+          osc1.start(now);
+          osc2.start(now);
+          osc1.stop(now + 1.2);
+          osc2.stop(now + 1.2);
+        }
+      }
+
+      playChime();
+      ringInterval = setInterval(playChime, 2200);
+
+      // Trigger Physical Mobile Vibration
+      if ('vibrate' in navigator) {
+        navigator.vibrate([600, 300, 600, 300, 1000]);
+      }
+    }
+
+    function stopRingtone() {
+      if (ringInterval) {
+        clearInterval(ringInterval);
+        ringInterval = null;
+      }
+      if ('vibrate' in navigator) {
+        navigator.vibrate(0);
+      }
+    }
+
+    // Trigger Incoming Call UI
+    function triggerIncomingCallUI(payload) {
+      currentEmailData = payload;
+      document.getElementById('call-sender').textContent = payload.sender || 'High Priority Contact';
+      document.getElementById('call-subject').textContent = payload.subject || 'Urgent Email Notice';
+      document.getElementById('screen-incoming').classList.remove('hidden');
+      document.getElementById('screen-incoming').classList.add('flex');
+      startRingtone();
+    }
+
+    function declineCall() {
+      stopRingtone();
+      document.getElementById('screen-incoming').classList.add('hidden');
+      document.getElementById('screen-incoming').classList.remove('flex');
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'CALL_DECLINED', email_id: currentEmailData ? currentEmailData.id : null }));
+      }
+    }
+
+    async function acceptCall() {
+      stopRingtone();
+      document.getElementById('screen-incoming').classList.add('hidden');
+      document.getElementById('screen-incoming').classList.remove('flex');
+
+      document.getElementById('screen-active').classList.remove('hidden');
+      document.getElementById('screen-active').classList.add('flex');
+
+      document.getElementById('active-sender-title').textContent = currentEmailData ? currentEmailData.sender : 'TARS Call';
+      isCallActive = true;
+      callSeconds = 0;
+      
+      callTimerInterval = setInterval(() => {
+        callSeconds++;
+        const mins = String(Math.floor(callSeconds / 60)).padStart(2, '0');
+        const secs = String(callSeconds % 60).padStart(2, '0');
+        document.getElementById('call-timer').textContent = `${mins}:${secs}`;
+      }, 1000);
+
+      // Start Microphone recording
+      await initMicrophoneRecording();
+
+      // Notify Server that Call was Answered
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: 'CALL_ACCEPTED',
+          email_data: currentEmailData
+        }));
+      }
+
+      drawVisualizer();
+    }
+
+    async function initMicrophoneRecording() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+        audioChunks = [];
+
+        mediaRecorder.ondataavailable = (e) => {
+          if (e.data.size > 0) audioChunks.push(e.data);
+        };
+
+        mediaRecorder.onstop = async () => {
+          if (audioChunks.length > 0 && isCallActive) {
+            const blob = new Blob(audioChunks, { type: 'audio/webm' });
+            audioChunks = [];
+            
+            // Convert to base64 and send to server
+            const reader = new FileReader();
+            reader.readAsDataURL(blob);
+            reader.onloadend = () => {
+              const base64Audio = reader.result.split(',')[1];
+              if (ws && ws.readyState === WebSocket.OPEN) {
+                updateStatusText('TARS Transcribing Your Voice...');
+                ws.send(JSON.stringify({
+                  type: 'USER_AUDIO_CHUNK',
+                  audio_base64: base64Audio
+                }));
+              }
+            };
+          }
+        };
+
+      } catch (err) {
+        console.error('Microphone Access Error:', err);
+        alert('Please allow microphone permissions to speak with TARS.');
+      }
+    }
+
+    function recordUserTurn(durationMs = 4000) {
+      if (!mediaRecorder || mediaRecorder.state === 'recording') return;
+      updateStatusText('Listening to you... (Speak)');
+      audioChunks = [];
+      mediaRecorder.start();
+      
+      setTimeout(() => {
+        if (mediaRecorder.state === 'recording') {
+          mediaRecorder.stop();
+        }
+      }, durationMs);
+    }
+
+    function playAgentAudio(base64Audio, spokenText) {
+      updateStatusText('TARS Speaking...');
+      appendDialogue('TARS', spokenText);
+
+      const audio = new Audio(`data:audio/mp3;base64,${base64Audio}`);
+      audio.onended = () => {
+        if (isCallActive) {
+          // Once TARS finishes speaking, automatically listen to user response!
+          recordUserTurn(5000);
+        }
+      };
+      audio.play().catch(e => {
+        console.error('Audio play error:', e);
+        recordUserTurn(4000);
+      });
+    }
+
+    function updateStatusText(txt) {
+      document.getElementById('status-text').textContent = txt;
+    }
+
+    function appendDialogue(speaker, text) {
+      const box = document.getElementById('dialogue-box');
+      const p = document.createElement('p');
+      if (speaker === 'TARS') {
+        p.className = 'text-cyan-400';
+        p.innerHTML = `<strong class="font-mono text-cyan-300">TARS:</strong> ${text}`;
+      } else {
+        p.className = 'text-gray-200';
+        p.innerHTML = `<strong class="font-mono text-emerald-400">You:</strong> ${text}`;
+      }
+      box.appendChild(p);
+      const container = document.getElementById('transcript-container');
+      container.scrollTop = container.scrollHeight;
+    }
+
+    function endCall() {
+      isCallActive = false;
+      stopRingtone();
+      if (callTimerInterval) clearInterval(callTimerInterval);
+      if (mediaRecorder && mediaRecorder.state === 'recording') mediaRecorder.stop();
+
+      document.getElementById('screen-active').classList.add('hidden');
+      document.getElementById('screen-active').classList.remove('flex');
+      document.getElementById('screen-incoming').classList.add('hidden');
+      document.getElementById('screen-incoming').classList.remove('flex');
+
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'HANGUP' }));
+      }
+    }
+
+    function toggleMute() {
+      isMuted = !isMuted;
+      document.getElementById('btn-mute').classList.toggle('bg-rose-500/20', isMuted);
+      document.getElementById('icon-mic').classList.toggle('text-rose-400', isMuted);
+    }
+
+    async function requestMicrophonePermission() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream.getTracks().forEach(track => track.stop());
+        document.getElementById('btn-mic-perm').innerHTML = `
+          <svg class="w-4 h-4 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+          </svg>
+          <span class="text-emerald-400 font-semibold">Microphone & Audio Ready</span>
+        `;
+      } catch (e) {
+        alert('Could not enable microphone. Please check browser settings.');
+      }
+    }
+
+    function triggerTestCall() {
+      fetch('/api/trigger-call', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sender: "Dean of Academics (ISL)",
+          subject: "Urgent: Project Showcase Rescheduled to 11:30 AM",
+          voice_script: "Commander, urgent notice from the Dean's office. Tomorrow's project showcase has been rescheduled to 11:30 AM. They need your immediate confirmation. Should I send an approval email?"
+        })
+      });
+    }
+
+    // Audio Visualizer Simulation
+    function drawVisualizer() {
+      const canvas = document.getElementById('visualizer-canvas');
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      let x = 0;
+
+      function render() {
+        if (!isCallActive) return;
+        requestAnimationFrame(render);
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        
+        const bars = 24;
+        const width = 6;
+        const gap = 6;
+        
+        for (let i = 0; i < bars; i++) {
+          const height = Math.sin(Date.now() * 0.005 + i * 0.4) * 35 + 40;
+          ctx.fillStyle = '#06b6d4';
+          ctx.fillRect(i * (width + gap) + 10, (canvas.height - height) / 2, width, height);
+        }
+      }
+      render();
+    }
+
+    // Initialize on page load
+    window.onload = () => {
+      connectWebSocket();
+    };
+  </script>
+</body>
+</html>

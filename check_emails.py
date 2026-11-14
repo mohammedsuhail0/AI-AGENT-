@@ -851,6 +851,18 @@ def main(max_emails=10, sleep_between=True):
             if category == "URGENT":
                 attached_filenames = [a['filename'] for a in attachments] if attachments else None
                 send_telegram_alert(sender, subject, reason, draft, thread_id, attach_resume=attach_resume, attached_files=attached_filenames)
+                try:
+                    import sip_caller
+                    print(f"📞 Dispatching autonomous voice call to Android phone for '{subject}'...")
+                    sip_caller.trigger_urgent_call_async(
+                        subject=subject,
+                        sender=sender,
+                        reason=reason,
+                        email_id=msg_id,
+                        body=body_truncated
+                    )
+                except Exception as call_err:
+                    print(f"⚠️ Voice call dispatch error: {call_err}")
 
 
             elif category == "INFO":
