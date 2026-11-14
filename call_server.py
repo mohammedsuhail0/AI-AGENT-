@@ -43,7 +43,7 @@ groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 VOICE_NAME = os.environ.get("TARS_VOICE", "en-GB-ThomasNeural")  # Marvel's JARVIS (Paul Bettany British accent)
 VOICE_PITCH = "+0Hz"
-VOICE_RATE = "+10%"
+VOICE_RATE = "+0%"
 
 app = FastAPI(title="TARS Voice Sentinel API", version="1.0.0")
 

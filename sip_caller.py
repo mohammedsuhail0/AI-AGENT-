@@ -83,11 +83,13 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 VOICE_MODEL = "en-GB-ThomasNeural"  # Marvel's JARVIS British Voice (Crisp, refined, Paul Bettany)
 VOICE_PITCH = "+0Hz"                # Studio natural pitch - crisp, zero distortion
-VOICE_RATE = "+10%"                 # Crisp, brisk, high-tech conversational cadence
+VOICE_RATE = "+0%"                  # Natural, clear conversational cadence (eliminates fast/rushed speech)
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_audio_cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 _SIP_CALL_LOCK = threading.Lock()
 _CACHED_PUBLIC_IP = None
+_active_inbound_call_id = None
+_active_inbound_lock = threading.Lock()
 
 
 def get_public_ip() -> str:
@@ -227,19 +229,28 @@ def generate_beep_ulaw(freq=660, duration_sec=0.15) -> bytes:
 
 
 class RTPPlayer:
-    """Maintains continuous monotonic RFC 3550 RTP sequence numbers and timestamps with sub-millisecond frame pacing."""
+    """Maintains RFC 3550 / RFC 3551 continuous wall-clock timestamps and monotonic sequence numbers with sub-millisecond frame pacing."""
     def __init__(self, rtp_sock, destinations, ssrc=0x34A8129B, srtp_session=None):
         self.rtp_sock = rtp_sock
         self.destinations = destinations
-        self.ssrc = ssrc
+        self.ssrc = ssrc if ssrc is not None else random.randint(0x10000000, 0xEFFFFFFF)
         self.srtp_session = srtp_session
-        self.seq = 1
-        self.timestamp = 0
+        self.seq = random.randint(1000, 25000)
+        self.session_t0 = time.perf_counter()
+        self.base_ts = random.randint(10000, 200000)
 
     def play(self, ulaw_data):
+        if not ulaw_data or not self.destinations:
+            return
         chunk_size = 160
-        start_time = time.time()
         chunks_count = (len(ulaw_data) + chunk_size - 1) // chunk_size
+        
+        # In RFC 3550 Section 5.1, the timestamp reflects the true wall-clock sampling instant (8000Hz).
+        # Aligning the start timestamp with elapsed real time completely eliminates Linphone's jitter buffer
+        # panic, keeping the call quality bar solid GREEN (4 bars) and preventing fast/choppy playback!
+        t_start = time.perf_counter()
+        elapsed_sec = t_start - self.session_t0
+        start_ts = (self.base_ts + int(elapsed_sec * 8000)) & 0xFFFFFFFF
         
         for idx in range(chunks_count):
             start = idx * chunk_size
@@ -247,11 +258,13 @@ class RTPPlayer:
             if len(chunk) < chunk_size:
                 chunk += b"\xff" * (chunk_size - len(chunk))
                 
-            pkt = make_rtp_packet(self.seq, self.timestamp, self.ssrc, chunk, marker=(idx == 0))
+            frame_ts = (start_ts + (idx * 160)) & 0xFFFFFFFF
+            # Marker bit (M) set to 1 on the first packet of a talkspurt per RFC 3551 Section 4.1
+            pkt = make_rtp_packet(self.seq, frame_ts, self.ssrc, chunk, marker=(idx == 0))
             if self.srtp_session:
                 try:
                     pkt = self.srtp_session.protect(pkt)
-                except Exception:
+                except Exception as e:
                     pass
 
             for target_ip, target_port in self.destinations:
@@ -261,15 +274,14 @@ class RTPPlayer:
                     pass
 
             self.seq = (self.seq + 1) & 0xFFFF
-            self.timestamp = (self.timestamp + 160) & 0xFFFFFFFF
 
-            target_time = start_time + (0.02 * (idx + 1))
-            # Precision hybrid sleep: eliminates 15.6ms Windows timer jitter
+            # Precision pacing: exactly 20.0ms per frame
+            target_time = t_start + (0.020 * (idx + 1))
             while True:
-                rem = target_time - time.time()
+                rem = target_time - time.perf_counter()
                 if rem <= 0:
                     break
-                if rem > 0.003:
+                if rem > 0.002:
                     time.sleep(0.001)
 
 
@@ -520,24 +532,40 @@ Respond ONLY with valid JSON:
     }
 
 
+def classify_confirmation_or_correction(transcript: str, dtmf: str = None) -> tuple[str, str]:
+    """
+    Distinguishes pure confirmation ('CONFIRM'), pure cancellation ('CANCEL'),
+    or user dictating an update/correction ('UPDATE', correction_text).
+    """
+    if dtmf == "1":
+        return "CONFIRM", ""
+    if dtmf == "2":
+        return "CANCEL", ""
+    clean = transcript.lower().strip()
+    if not clean:
+        return "CANCEL", ""
+    if clean in ["cancel", "no", "stop", "don't send", "dont send", "never mind", "nevermind", "exit"]:
+        return "CANCEL", ""
+    positive = ["yes", "yeah", "yep", "send", "send it", "go ahead", "okay", "ok", "confirm", "do it", "sure", "dispatch", "looks good", "perfect"]
+    has_pos = any(p in clean.split() or clean.startswith(p) for p in positive)
+    has_mod = any(neg in clean for neg in ["change", "instead", "don't", "dont", "make it", "actually", "rather", "next", "say", "tell", "after"])
+    if has_pos and not has_mod:
+        return "CONFIRM", ""
+    if has_mod or len(clean.split()) >= 3:
+        return "UPDATE", transcript
+    return "CANCEL", ""
+
+
 def is_user_confirming_send(transcript: str, dtmf: str = None) -> bool:
     """Checks if user confirmed dispatching the email (or pressed 1)."""
-    if dtmf == "1":
-        return True
-    if dtmf == "2":
-        return False
-    clean_t = transcript.lower().strip()
-    positive = ["yes", "yeah", "yep", "send", "send it", "go ahead", "okay", "ok", "confirm", "do it", "sure", "dispatch"]
-    negative = ["no", "wait", "cancel", "don't", "dont", "stop", "change", "hold"]
-    if any(p in clean_t for p in positive) and not any(n in clean_t for n in negative):
-        return True
-    return False
+    decision, _ = classify_confirmation_or_correction(transcript, dtmf)
+    return decision == "CONFIRM"
 
 
-def record_user_speech(rtp_sock, max_seconds=9.0, silence_timeout=1.2, player=None, srtp_session=None) -> tuple[bytes, str]:
+def record_user_speech(rtp_sock, max_seconds=15.0, silence_timeout=1.8, player=None, srtp_session=None) -> tuple[bytes, str]:
     """
     Records incoming RTP audio packets from the user's phone microphone.
-    Natural 1.2s silence timeout gives comfortable room for conversational pauses.
+    Natural 1.8s silence timeout gives comfortable room for conversational pauses without cutting user off.
     Supports symmetric RTP: automatically locks onto the sender's transmitting port.
     Supports SRTP decryption when srtp_session is provided.
     Returns (linear_pcm_bytes, dtmf_digit).
@@ -928,9 +956,9 @@ def _trigger_urgent_call_impl(
             player.play(beep_ulaw)
 
         # -------------------------------------------------------------
-        # TURN 2: USER DICTATES INSTRUCTIONS (Natural 1.2s Silence Cut)
+        # TURN 2: USER DICTATES INSTRUCTIONS (Natural 1.8s Silence Cut, up to 15s)
         # -------------------------------------------------------------
-        user_pcm, dtmf_digit = record_user_speech(rtp_sock, max_seconds=9.0, silence_timeout=1.2, player=player)
+        user_pcm, dtmf_digit = record_user_speech(rtp_sock, max_seconds=15.0, silence_timeout=1.8, player=player)
 
         # Instant 0ms filler audio: No dead silence!
         if destinations:
@@ -950,7 +978,7 @@ def _trigger_urgent_call_impl(
             if destinations:
                 player.play(retry_prompt)
                 player.play(beep_ulaw)
-            user_pcm, dtmf_digit = record_user_speech(rtp_sock, max_seconds=8.0, silence_timeout=1.2, player=player)
+            user_pcm, dtmf_digit = record_user_speech(rtp_sock, max_seconds=10.0, silence_timeout=1.8, player=player)
             transcript = transcribe_pcm_audio(user_pcm) if len(user_pcm) >= 1500 else ""
 
         print(f"\n=======================================================")
@@ -970,7 +998,7 @@ def _trigger_urgent_call_impl(
         drafted_body = analysis.get("drafted_body", "")
 
         # -------------------------------------------------------------
-        # TURN 3: VERIFY WITH USER BEFORE SENDING
+        # TURN 3: VERIFY WITH USER BEFORE SENDING (Supports Corrections!)
         # -------------------------------------------------------------
         if intent == "CANCEL":
             cancel_audio = get_or_create_cached_audio("cancel", "No problem boss, canceled.")
@@ -984,12 +1012,34 @@ def _trigger_urgent_call_impl(
                 player.play(confirm_q_ulaw)
                 player.play(beep_ulaw)
 
-            # Listen for quick confirmation (1.0s natural silence timeout)
-            confirm_pcm, confirm_dtmf = record_user_speech(rtp_sock, max_seconds=5.0, silence_timeout=1.0, player=player)
+            # Listen for confirmation or modification (allow 1.5s natural pause)
+            confirm_pcm, confirm_dtmf = record_user_speech(rtp_sock, max_seconds=7.0, silence_timeout=1.5, player=player)
             confirm_transcript = transcribe_pcm_audio(confirm_pcm) if len(confirm_pcm) >= 1500 else ""
-            user_confirmed = is_user_confirming_send(confirm_transcript, confirm_dtmf)
+            decision, update_text = classify_confirmation_or_correction(confirm_transcript, confirm_dtmf)
+            print(f"🗣️ USER CONFIRMATION: '{confirm_transcript}' | Decision: {decision}")
 
-            print(f"🗣️ USER CONFIRMATION: '{confirm_transcript}' | Decision: {user_confirmed}")
+            if decision == "UPDATE":
+                print(f"🔄 Boss requested adjustment: '{update_text}' - Updating draft...")
+                revised_analysis = parse_user_intent_and_draft(
+                    transcript=f"Original: {transcript}. Modification from user: {update_text}",
+                    email_subject=clean_subject,
+                    email_sender=clean_sender,
+                    email_body=clean_reason or body
+                )
+                drafted_body = revised_analysis.get("drafted_body", drafted_body)
+                attach_resume = revised_analysis.get("attach_resume", attach_resume)
+                spoken_confirmation = revised_analysis.get("spoken_confirmation", "Got it boss. I updated the email as requested. Should I send it now?")
+                print(f"🗣️ TARS Re-confirming: '{spoken_confirmation}'")
+                rev_q_ulaw = asyncio.run(generate_speech_ulaw(spoken_confirmation, rate=VOICE_RATE, pitch=VOICE_PITCH))
+                if destinations:
+                    player.play(rev_q_ulaw)
+                    player.play(beep_ulaw)
+                rev_pcm, rev_dtmf = record_user_speech(rtp_sock, max_seconds=6.0, silence_timeout=1.2, player=player)
+                rev_transcript = transcribe_pcm_audio(rev_pcm) if len(rev_pcm) >= 1500 else ""
+                rev_dec, _ = classify_confirmation_or_correction(rev_transcript, rev_dtmf)
+                user_confirmed = (rev_dec == "CONFIRM" or "yes" in rev_transcript.lower() or "send" in rev_transcript.lower())
+            else:
+                user_confirmed = (decision == "CONFIRM")
 
             # -------------------------------------------------------------
             # TURN 4: INSTANT DISPATCH VIA GMAIL & CLEAN FAREWELL
@@ -1231,10 +1281,17 @@ Respond ONLY with valid JSON:
 
 def handle_inbound_voice_session(rtp_sock, destinations, call_id, from_tag, to_tag, contact_uri, caller_ip, caller_port, sip_sock, local_ip, local_port, routes=None, tx_srtp=None, rx_srtp=None):
     """Executes full interactive AI voice agent when Suhail calls in."""
+    def is_current_call():
+        with _active_inbound_lock:
+            return _active_inbound_call_id == call_id
+
     # Pre-lock symmetric RTP: wait up to 0.8s for the phone's audio channel to open upon pickup
     rtp_sock.settimeout(0.08)
     prelock_start = time.time()
     while time.time() - prelock_start < 0.8:
+        if not is_current_call():
+            rtp_sock.close()
+            return
         try:
             data, s_addr = rtp_sock.recvfrom(2048)
             if len(data) >= 12 and s_addr:
@@ -1243,6 +1300,10 @@ def handle_inbound_voice_session(rtp_sock, destinations, call_id, from_tag, to_t
                 break
         except Exception:
             pass
+
+    if not is_current_call():
+        rtp_sock.close()
+        return
 
     player = RTPPlayer(rtp_sock, destinations, srtp_session=tx_srtp)
     beep_ulaw = generate_beep_ulaw(freq=800, duration_sec=0.18)
@@ -1257,9 +1318,17 @@ def handle_inbound_voice_session(rtp_sock, destinations, call_id, from_tag, to_t
     player.play(inbound_greeting)
     player.play(beep_ulaw)
 
-    # 2. Record command (pass player so symmetric RTP locks onto phone's incoming port)
-    user_pcm, dtmf_digit = record_user_speech(rtp_sock, max_seconds=9.0, silence_timeout=1.2, player=player, srtp_session=rx_srtp)
+    if not is_current_call():
+        rtp_sock.close()
+        return
+
+    # 2. Record command (comfortable 1.8s silence window, up to 15s)
+    user_pcm, dtmf_digit = record_user_speech(rtp_sock, max_seconds=15.0, silence_timeout=1.8, player=player, srtp_session=rx_srtp)
     player.play(ack_drafting_ulaw)
+
+    if not is_current_call():
+        rtp_sock.close()
+        return
 
     transcript = transcribe_pcm_audio(user_pcm) if len(user_pcm) >= 1500 else ""
     print(f"\n🗣️ BOSS INBOUND COMMAND: '{transcript}'")
@@ -1269,14 +1338,15 @@ def handle_inbound_voice_session(rtp_sock, destinations, call_id, from_tag, to_t
         retry_prompt = asyncio.run(generate_speech_ulaw("I didn't catch that boss. Who would you like me to email, and what should I say?", rate=VOICE_RATE, pitch=VOICE_PITCH))
         player.play(retry_prompt)
         player.play(beep_ulaw)
-        user_pcm, dtmf_digit = record_user_speech(rtp_sock, max_seconds=9.0, silence_timeout=1.2, player=player, srtp_session=rx_srtp)
+        user_pcm, dtmf_digit = record_user_speech(rtp_sock, max_seconds=10.0, silence_timeout=1.8, player=player, srtp_session=rx_srtp)
         transcript = transcribe_pcm_audio(user_pcm) if len(user_pcm) >= 1500 else ""
         print(f"🗣️ BOSS INBOUND RETRY COMMAND: '{transcript}'")
 
-    if not transcript:
-        player.play(cancel_ulaw)
-        time.sleep(0.5)
-        _send_inbound_bye(sip_sock, contact_uri, local_ip, local_port, to_tag, from_tag, call_id, caller_ip, caller_port, routes)
+    if not transcript or not is_current_call():
+        if is_current_call():
+            player.play(cancel_ulaw)
+            time.sleep(0.5)
+            _send_inbound_bye(sip_sock, contact_uri, local_ip, local_port, to_tag, from_tag, call_id, caller_ip, caller_port, routes)
         rtp_sock.close()
         return
 
@@ -1289,16 +1359,35 @@ def handle_inbound_voice_session(rtp_sock, destinations, call_id, from_tag, to_t
     attach_resume = parsed.get("attach_resume", True)
     spoken_confirmation = parsed.get("spoken_confirmation", f"Got it boss. I'll email {recip_query} saying what you wanted, and attach your resume. Should I send it now, boss?")
 
-    # 4. Confirm with user
+    # 4. Confirm with user (supports corrections)
     print(f"🗣️ TARS Inbound Confirming: '{spoken_confirmation}'")
     confirm_q_ulaw = asyncio.run(generate_speech_ulaw(spoken_confirmation, rate=VOICE_RATE, pitch=VOICE_PITCH))
     player.play(confirm_q_ulaw)
     player.play(beep_ulaw)
 
-    confirm_pcm, confirm_dtmf = record_user_speech(rtp_sock, max_seconds=5.0, silence_timeout=1.0, player=player, srtp_session=rx_srtp)
+    confirm_pcm, confirm_dtmf = record_user_speech(rtp_sock, max_seconds=7.0, silence_timeout=1.5, player=player, srtp_session=rx_srtp)
     confirm_transcript = transcribe_pcm_audio(confirm_pcm) if len(confirm_pcm) >= 1500 else ""
-    user_confirmed = is_user_confirming_send(confirm_transcript, confirm_dtmf)
-    print(f"🗣️ BOSS CONFIRMATION: '{confirm_transcript}' | Decision: {user_confirmed}")
+    decision, update_text = classify_confirmation_or_correction(confirm_transcript, confirm_dtmf)
+    print(f"🗣️ BOSS CONFIRMATION: '{confirm_transcript}' | Decision: {decision}")
+
+    if decision == "UPDATE" and is_current_call():
+        print(f"🔄 Boss updated inbound instruction: '{update_text}' - Updating draft...")
+        revised = parse_inbound_email_dictation(f"Original request: {transcript}. Boss modification: {update_text}")
+        drafted_body = revised.get("drafted_body", drafted_body)
+        attach_resume = revised.get("attach_resume", attach_resume)
+        spoken_confirmation = revised.get("spoken_confirmation", "Got it boss. I updated the draft. Shall I send it now?")
+        player.play(asyncio.run(generate_speech_ulaw(spoken_confirmation, rate=VOICE_RATE, pitch=VOICE_PITCH)))
+        player.play(beep_ulaw)
+        rev_pcm, rev_dtmf = record_user_speech(rtp_sock, max_seconds=6.0, silence_timeout=1.2, player=player, srtp_session=rx_srtp)
+        rev_transcript = transcribe_pcm_audio(rev_pcm) if len(rev_pcm) >= 1500 else ""
+        rev_dec, _ = classify_confirmation_or_correction(rev_transcript, rev_dtmf)
+        user_confirmed = (rev_dec == "CONFIRM" or "yes" in rev_transcript.lower() or "send" in rev_transcript.lower())
+    else:
+        user_confirmed = (decision == "CONFIRM")
+
+    if not is_current_call():
+        rtp_sock.close()
+        return
 
     if user_confirmed:
         player.play(ack_sending_ulaw)
@@ -1355,6 +1444,7 @@ def run_inbound_sip_server(port=5060):
     - Sends 280s keep-alive refresh so phone can call from anywhere (Wi-Fi or cellular).
     - Accepts calls to suhail_tars, briefs Suhail, takes voice command, and sends email.
     """
+    global _active_inbound_call_id
     server = LINPHONE_DOMAIN
     server_port = 5060
     username = LINPHONE_USERNAME
@@ -1470,6 +1560,8 @@ def run_inbound_sip_server(port=5060):
                 print(f"=======================================================")
                 call_id_m = re.search(r'Call-ID:\s*([^\r\n]+)', msg, re.IGNORECASE)
                 call_id = call_id_m.group(1).strip() if call_id_m else ""
+                with _active_inbound_lock:
+                    _active_inbound_call_id = call_id
                 from_m = re.search(r'From:\s*([^\r\n]+)', msg, re.IGNORECASE)
                 from_hdr = from_m.group(1).strip() if from_m else ""
                 from_tag_m = re.search(r'tag=([^\r\n;]+)', from_hdr)
@@ -1569,7 +1661,12 @@ def run_inbound_sip_server(port=5060):
                 if "REGISTER" in msg:
                     print("✅ Linphone Registration Confirmed: 200 OK")
 
-            elif first_line.startswith("BYE"):
+            elif first_line.startswith("BYE") or first_line.startswith("CANCEL"):
+                bye_call_id_m = re.search(r'Call-ID:\s*([^\r\n]+)', msg, re.IGNORECASE)
+                bye_call_id = bye_call_id_m.group(1).strip() if bye_call_id_m else ""
+                with _active_inbound_lock:
+                    if _active_inbound_call_id == bye_call_id:
+                        _active_inbound_call_id = None
                 via_lines = re.findall(r'(Via:\s*[^\r\n]+)', msg, re.IGNORECASE)
                 v_str = "".join(f"{vl.strip()}\r\n" for vl in via_lines)
                 f_m = re.search(r'(From:\s*[^\r\n]+)', msg, re.IGNORECASE)
