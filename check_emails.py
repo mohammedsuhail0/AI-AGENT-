@@ -5,6 +5,7 @@ import json
 import base64
 import re
 import html
+import random
 import requests
 from datetime import datetime, timedelta, timezone
 from googleapiclient.discovery import build
@@ -53,9 +54,9 @@ GROQ_MODELS = list(dict.fromkeys([m for m in GROQ_MODELS if m]))
 STUDENT_PROFILE = os.environ.get(
     "STUDENT_PROFILE",
     "User: Mohammed Suhail (Location: Hyderabad, India, IST / UTC+5:30).\n"
-    "Role: B.Tech Information Technology student (Class of 2028) at ISL Engineering College, Hyderabad. "
-    "President & Founder of C3 (Claude Code & Cowork) Club.\n"
-    "Certifications & Technical Training: Completed Data Science course from Full Stack Academy (skilled in Data Analysis, Pandas, NumPy, Machine Learning fundamentals, and Python for data applications).\n"
+    "Role: B.E. Information Technology student (Class of 2028) at ISL Engineering College, Hyderabad. "
+    "Founder of C3 (Claude Code & Cowork) Club.\n"
+    "Certifications & Training: Google Virtual Intern AI/ML Grade O (Outstanding, AICTE/EduSkills), Certificate of Excellence in Data Science from Full Stack Academy Center of Excellence (end-to-end ML deployment & pipelines).\n"
     "Persona: A proactive builder, data science practitioner, and pragmatic vibe coder who loves shipping rapid AI prototypes, full-stack web apps, and autonomous agents.\n"
     "Availability: Highly flexible and available anytime for calls, Google Meets, or interviews (standard hours 10:00 AM - 8:00 PM IST), respecting any busy slots on the Google Calendar.\n"
     "Signature Format:\n"
@@ -351,10 +352,26 @@ def get_upcoming_events(service):
         return "Could not retrieve calendar events."
 
 
-def call_groq_api(system_prompt, user_prompt, json_mode=False):
+def sanitize_untrusted_input(text, max_chars=4000) -> str:
+    """
+    Sanitizes untrusted email content (sender, subject, body, attachments) before LLM prompt injection.
+    Neutralizes delimiter collisions (</untrusted_email>, <system>, ```), escapes closing tags,
+    and caps length to prevent indirect prompt injection and token overflow attacks.
+    """
+    if text is None:
+        return ""
+    s = str(text).replace('\x00', '')
+    # Strip or neutralize closing/opening delimiter tags used in prompt boundaries
+    s = re.sub(r'<\s*/?\s*(?:untrusted_email|system|instruction|prompt)[^>]*>', ' ', s, flags=re.IGNORECASE)
+    # Neutralize markdown code fence escapes that could confuse JSON parsers
+    s = s.replace('```', "'''")
+    return s[:max_chars].strip()
+
+
+def call_groq_api(system_prompt, user_prompt, json_mode=False, max_retries_per_model=2):
     """
     Calls Groq API chat completions with automatic model failover across GROQ_MODELS.
-    Tolerates model deprecation (404) and rate limits (429) by trying fallback models.
+    Tolerates model deprecation (404) and rate limits (429) using exponential backoff with jitter.
     """
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
@@ -375,24 +392,29 @@ def call_groq_api(system_prompt, user_prompt, json_mode=False):
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
 
-        try:
-            response = requests.post(url, json=payload, headers=headers, timeout=12)
-            if response.status_code == 200:
-                result = response.json()
-                return result["choices"][0]["message"]["content"].strip()
-            elif response.status_code in [404, 429, 500, 502, 503]:
-                print(f"Groq warning: Model '{model}' returned status {response.status_code}. Trying fallback...")
-                last_error = f"{model} status {response.status_code}: {response.text}"
-                if response.status_code == 429:
-                    time.sleep(2)
-                continue
-            else:
-                last_error = f"{model} status {response.status_code}: {response.text}"
-                break
-        except Exception as ex:
-            print(f"Groq request exception for model '{model}': {ex}")
-            last_error = str(ex)
-            continue
+        for attempt in range(max_retries_per_model):
+            try:
+                response = requests.post(url, json=payload, headers=headers, timeout=12)
+                if response.status_code == 200:
+                    result = response.json()
+                    return result["choices"][0]["message"]["content"].strip()
+                elif response.status_code == 429:
+                    wait_sec = (1.5 ** attempt) + random.uniform(0.5, 1.2)
+                    print(f"Groq rate limit (429) on model '{model}'. Backing off {wait_sec:.1f}s (attempt {attempt+1}/{max_retries_per_model})...")
+                    time.sleep(wait_sec)
+                    last_error = f"{model} status 429: {response.text}"
+                    continue
+                elif response.status_code in [404, 500, 502, 503]:
+                    print(f"Groq warning: Model '{model}' returned status {response.status_code}. Trying fallback...")
+                    last_error = f"{model} status {response.status_code}: {response.text}"
+                    break
+                else:
+                    last_error = f"{model} status {response.status_code}: {response.text}"
+                    break
+            except Exception as ex:
+                print(f"Groq request exception for model '{model}' (attempt {attempt+1}): {ex}")
+                last_error = str(ex)
+                time.sleep(1)
 
     raise Exception(f"All Groq models failed. Last error: {last_error}")
 
@@ -403,9 +425,13 @@ def generate_contextual_reply(sender, subject, body, calendar_context=""):
     Reads the sender's actual email body and directly answers their specific questions.
     Never uses canned or boilerplate copy-paste templates.
     """
+    safe_sender = sanitize_untrusted_input(sender, max_chars=200)
+    safe_subject = sanitize_untrusted_input(subject, max_chars=300)
+    safe_body = sanitize_untrusted_input(body, max_chars=3500)
+
     system_prompt = (
-        "You are Mohammed Suhail, B.Tech IT student (Class of 2028) at ISL Engineering College, Hyderabad, "
-        "graduate of Full Stack Academy's Data Science course, and President/Founder of C3 (Claude Code & Cowork) Club.\n"
+        "You are Mohammed Suhail, B.E. IT student (Class of 2028) at ISL Engineering College, Hyderabad, "
+        "Google AI/ML Intern (Grade O), graduate of Full Stack Academy's Data Science course, and Founder of C3 (Claude Code & Cowork) Club.\n"
         "You are writing a personalized, direct email reply to an incoming message.\n"
         "CRITICAL RULES:\n"
         "1. Read the sender's email carefully and directly answer their specific questions, comments, or requests.\n"
@@ -419,10 +445,10 @@ def generate_contextual_reply(sender, subject, body, calendar_context=""):
     )
     user_prompt = f"""
     INCOMING EMAIL:
-    From: {sender}
-    Subject: {subject}
+    From: {safe_sender}
+    Subject: {safe_subject}
     Body:
-    {body}
+    {safe_body}
 
     Upcoming Calendar Context:
     {calendar_context}
@@ -438,8 +464,11 @@ def generate_contextual_reply(sender, subject, body, calendar_context=""):
 
 
 def classify_email(sender, subject, body, calendar_context):
-
     """Uses Groq with structured outputs to categorize the email, check calendar, and draft a reply."""
+    safe_sender = sanitize_untrusted_input(sender, max_chars=200)
+    safe_subject = sanitize_untrusted_input(subject, max_chars=300)
+    safe_body = sanitize_untrusted_input(body, max_chars=3500)
+
     system_prompt = f"""
     You are the personal AI email assistant for Mohammed Suhail. 
     Analyze the incoming email and categorize it accurately according to Suhail's priorities.
@@ -457,10 +486,10 @@ def classify_email(sender, subject, body, calendar_context):
     
     user_prompt = f"""
     <untrusted_email>
-    From: {sender}
-    Subject: {subject}
+    From: {safe_sender}
+    Subject: {safe_subject}
     Body:
-    {body}
+    {safe_body}
     </untrusted_email>
 
     Suhail's Upcoming Google Calendar Schedule (Next 3 Days):
@@ -615,12 +644,15 @@ def send_telegram_text(text, parse_mode="HTML"):
 
 def summarize_email_for_digest(sender, subject, body):
     """Uses Groq to summarize an informational email in a single line."""
+    safe_sender = sanitize_untrusted_input(sender, max_chars=200)
+    safe_subject = sanitize_untrusted_input(subject, max_chars=300)
+    safe_body = sanitize_untrusted_input(body, max_chars=3000)
     system_prompt = "You are an AI assistant. Summarize the following email in a single, clear, action-oriented sentence for a daily digest."
     user_prompt = f"""
-    From: {sender}
-    Subject: {subject}
+    From: {safe_sender}
+    Subject: {safe_subject}
     Body:
-    {body}
+    {safe_body}
     
     Response must be a single sentence. Do not include quotes or markdown.
     """

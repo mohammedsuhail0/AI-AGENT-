@@ -712,20 +712,23 @@ def generate_contextual_reply(sender: str, subject: str, email_body: str, instru
     Never uses canned or boilerplate copy-paste templates.
     """
     api_key = os.environ.get("GROQ_API_KEY") or GROQ_API_KEY
-    clean_body = email_body[:1500].strip() if email_body else "(No body text provided)"
+    safe_sender = check_emails.sanitize_untrusted_input(sender or "", max_chars=200)
+    safe_subject = check_emails.sanitize_untrusted_input(subject or "", max_chars=300)
+    safe_body = check_emails.sanitize_untrusted_input(email_body or "(No body text provided)", max_chars=2500)
+    safe_instruction = check_emails.sanitize_untrusted_input(instruction, max_chars=500) if instruction else None
 
-    prompt = f"""You are Mohammed Suhail, B.Tech IT student (Class of 2028) at ISL Engineering College, Hyderabad, graduate of Full Stack Academy's Data Science course, and President/Founder of C3 (Claude Code & Cowork) Club.
+    prompt = f"""You are Mohammed Suhail, B.E. IT student (Class of 2028) at ISL Engineering College, Hyderabad, Google AI/ML Intern (Grade O), graduate of Full Stack Academy's Data Science course, and President/Founder of C3 (Claude Code & Cowork) Club.
 You are replying directly to an email sent to you.
 
 
 INCOMING EMAIL:
-From: {sender}
-Subject: {subject}
+From: {safe_sender}
+Subject: {safe_subject}
 Body Content:
-{clean_body}
+{safe_body}
 
 SUHAIL'S INTENT / GOAL:
-{instruction or "Read the email carefully and write a personalized, polite, and authentic reply directly addressing the sender's specific questions or statements."}
+{safe_instruction or "Read the email carefully and write a personalized, polite, and authentic reply directly addressing the sender's specific questions or statements."}
 
 CRITICAL RULES:
 1. READ their message with deep comprehension.

@@ -5,6 +5,7 @@ import requests
 import re
 import sys
 import html
+import secrets
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from google.oauth2.credentials import Credentials
@@ -19,6 +20,9 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import check_emails
 
 app = FastAPI()
+
+# In-memory idempotency deduplication cache
+_PROCESSED_CALLBACKS = set()
 
 # Load local .env file if it exists (for local testing)
 env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
@@ -203,6 +207,20 @@ def edit_telegram_message(chat_id, message_id, status_text, parse_mode="HTML"):
         requests.post(url, json=payload, timeout=10)
 
 
+def answer_callback_query(callback_query_id, text=None):
+    """Acknowledges receipt of callback query to stop button loading spinner."""
+    if not callback_query_id or not TELEGRAM_BOT_TOKEN:
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery"
+    payload = {"callback_query_id": callback_query_id}
+    if text:
+        payload["text"] = text
+    try:
+        requests.post(url, json=payload, timeout=5)
+    except Exception:
+        pass
+
+
 def run_status_check():
     """Runs a check on Gmail, Calendar, and Groq APIs."""
     status_msg = "🔌 <b>API CONNECTION STATUS CHECK</b>\n\n"
@@ -287,8 +305,8 @@ def run_inbox_count():
 async def telegram_webhook(request: Request):
     """Entrypoint for Telegram webhook updates."""
     if WEBHOOK_SECRET_TOKEN:
-        received_token = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
-        if received_token != WEBHOOK_SECRET_TOKEN:
+        received_token = request.headers.get("X-Telegram-Bot-Api-Secret-Token") or ""
+        if not secrets.compare_digest(received_token, WEBHOOK_SECRET_TOKEN):
             raise HTTPException(status_code=403, detail="Unauthorized webhook source")
 
     data = await request.json()
@@ -296,15 +314,27 @@ async def telegram_webhook(request: Request):
     # 1. Handle Callback Queries (Button Taps)
     if "callback_query" in data:
         callback = data["callback_query"]
+        callback_id = callback.get("id")
         user_chat_id = str(callback["message"]["chat"]["id"])
         message_id = callback["message"]["message_id"]
         message_text = callback["message"].get("text", "")
         callback_data = callback.get("data", "")
         
-        if user_chat_id != TELEGRAM_CHAT_ID:
+        if not secrets.compare_digest(user_chat_id, str(TELEGRAM_CHAT_ID or "")):
             return JSONResponse(content={"status": "unauthorized"})
 
-        # Double-click idempotency check
+        # Double-click idempotency check (fast memory cache)
+        if callback_id and callback_id in _PROCESSED_CALLBACKS:
+            return JSONResponse(content={"status": "already_processed"})
+        if callback_id:
+            _PROCESSED_CALLBACKS.add(callback_id)
+            if len(_PROCESSED_CALLBACKS) > 1000:
+                _PROCESSED_CALLBACKS.clear()
+
+        # Stop button loading spinner in Telegram client
+        answer_callback_query(callback_id)
+
+        # Double-click idempotency check (message text inspection)
         if "Email Sent successfully" in message_text or "Archived Alert (Ignored)" in message_text:
             return JSONResponse(content={"status": "already_processed"})
 
@@ -363,7 +393,7 @@ async def telegram_webhook(request: Request):
         user_chat_id = str(message["chat"]["id"])
         text = message.get("text", "").strip()
 
-        if user_chat_id != TELEGRAM_CHAT_ID:
+        if not secrets.compare_digest(user_chat_id, str(TELEGRAM_CHAT_ID or "")):
             return JSONResponse(content={"status": "unauthorized"})
 
         if text.startswith("/"):

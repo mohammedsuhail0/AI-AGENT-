@@ -26,9 +26,23 @@ try:
 except ImportError:
     docx = None
 
+MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024  # 10 MB ceiling for DoS / memory exhaustion protection
+
+
+def sanitize_cell_value(val: Any) -> str:
+    """Neutralizes CSV/Excel formula injection (DDE / CSV Injection) by prefixing dangerous triggers."""
+    if val is None:
+        return ""
+    s = str(val).strip()
+    if s and s[0] in ('=', '+', '-', '@', '\t', '\r'):
+        return "'" + s
+    return s
+
 
 def parse_excel(file_bytes: bytes, filename: str, max_rows: int = 50, max_chars: int = 2500) -> str:
     """Parses Excel (.xlsx, .xls) workbooks into readable markdown tables."""
+    if len(file_bytes) > MAX_ATTACHMENT_BYTES:
+        return f"[Excel file: {filename} skipped: exceeds 10MB size limit]"
     if not openpyxl:
         return f"[Excel file: {filename} (openpyxl library not installed)]"
 
@@ -44,7 +58,7 @@ def parse_excel(file_bytes: bytes, filename: str, max_rows: int = 50, max_chars:
             for row in sheet.iter_rows(values_only=True):
                 # Filter out completely empty rows
                 if any(cell is not None and str(cell).strip() != "" for cell in row):
-                    cleaned_cells = [str(c).strip() if c is not None else "" for c in row]
+                    cleaned_cells = [sanitize_cell_value(c) if c is not None else "" for c in row]
                     # Don't keep infinite trailing empty columns
                     while cleaned_cells and cleaned_cells[-1] == "":
                         cleaned_cells.pop()
@@ -97,7 +111,7 @@ def parse_csv(file_bytes: bytes, filename: str, max_rows: int = 50, max_chars: i
         rows = []
         for i, row in enumerate(reader):
             if any(cell.strip() for cell in row):
-                rows.append([cell.strip() for cell in row])
+                rows.append([sanitize_cell_value(cell.strip()) for cell in row])
             if i >= max_rows:
                 break
 
@@ -166,7 +180,7 @@ def parse_docx(file_bytes: bytes, filename: str, max_chars: int = 2500) -> str:
         for table in doc.tables[:3]:  # inspect up to 3 tables
             t_rows = []
             for row in table.rows[:20]:
-                cells = [c.text.strip() for c in row.cells]
+                cells = [sanitize_cell_value(c.text.strip()) for c in row.cells]
                 if any(cells):
                     t_rows.append(" | ".join(cells))
             if t_rows:
@@ -194,6 +208,9 @@ def parse_attachment(filename: str, file_bytes: bytes, max_chars: int = 2500) ->
     """Universal attachment parser routing to the correct parser based on file extension."""
     if not file_bytes:
         return f"[Empty file: {filename}]"
+
+    if len(file_bytes) > MAX_ATTACHMENT_BYTES:
+        return f"[Attachment {filename} skipped: exceeds 10MB safety limit]"
 
     fn_lower = filename.lower()
 

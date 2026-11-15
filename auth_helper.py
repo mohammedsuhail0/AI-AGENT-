@@ -21,10 +21,14 @@ def main():
     print("Initializing Google OAuth 2.0 Flow...")
     flow = InstalledAppFlow.from_client_secrets_file(credentials_path, SCOPES)
     
-    # Run the local server for authorization with offline access
-    creds = flow.run_local_server(port=8080, prompt='consent', access_type='offline')
+    # Run local server for authorization with offline access; fallback to ephemeral port if 8080 is occupied
+    try:
+        creds = flow.run_local_server(port=8080, prompt='consent', access_type='offline')
+    except OSError:
+        print("Port 8080 is occupied, binding to an available dynamic port...")
+        creds = flow.run_local_server(port=0, prompt='consent', access_type='offline')
     
-    # Load client secrets to print ID and Secret directly
+    # Load client secrets to inspect config
     with open(credentials_path, 'r') as f:
         client_secrets = json.load(f)
         
@@ -33,12 +37,15 @@ def main():
     client_secret = web_config.get('client_secret')
     refresh_token = creds.refresh_token
 
+    masked_secret = f"{client_secret[:4]}...{client_secret[-4:]}" if client_secret and len(client_secret) > 8 else "***"
+    masked_token = f"{refresh_token[:6]}...{refresh_token[-4:]}" if refresh_token and len(refresh_token) > 10 else "***"
+
     print("\n" + "="*60)
     print("SUCCESSFULLY AUTHENTICATED!")
     print("="*60)
     print(f"\nGOOGLE_CLIENT_ID: {client_id}")
-    print(f"GOOGLE_CLIENT_SECRET: {client_secret}")
-    print(f"GOOGLE_REFRESH_TOKEN: {refresh_token}")
+    print(f"GOOGLE_CLIENT_SECRET: {masked_secret} (Stored securely in .env)")
+    print(f"GOOGLE_REFRESH_TOKEN: {masked_token} (Stored securely in .env)")
     print("\n" + "="*60)
 
     # Auto-update .env file
