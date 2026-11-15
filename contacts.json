@@ -1,0 +1,27 @@
+{
+  "samer": {
+    "name": "Mohammad Sameer",
+    "email": "mohammadsameer.1@gmail.com",
+    "aliases": ["samer", "sameer", "mohammad sameer", "samar", "summer", "tab", "sameeruddin"]
+  },
+  "bilal": {
+    "name": "Mohammad Bilal",
+    "email": "mohammad.bilal24it@gmail.com",
+    "aliases": ["bilal", "mohammad bilal", "bilal it", "classmate"]
+  },
+  "kaizen": {
+    "name": "Studio Kaizen",
+    "email": "studiokaizen03@gmail.com",
+    "aliases": ["kaizen", "studio kaizen", "design team"]
+  },
+  "webclient": {
+    "name": "Web Client",
+    "email": "webclient07@gmail.com",
+    "aliases": ["web client", "client"]
+  },
+  "myself": {
+    "name": "Mohammed Suhail",
+    "email": "mdsuhailtab.1@gmail.com",
+    "aliases": ["myself", "me", "suhail", "my email", "my personal mail"]
+  }
+}

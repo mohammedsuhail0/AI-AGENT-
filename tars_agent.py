@@ -12,6 +12,7 @@ import sys
 import json
 import base64
 import html
+import re
 import requests
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -54,6 +55,16 @@ Key background context about Suhail:
 - "Vibe Coder" builder philosophy: pragmatic, fast prototyping, zero unnecessary fluff.
 - Available for meetings & calls: 10:00 AM – 8:00 PM IST.
 - Contact: mdsuhailtab.1@gmail.com | +91 63016 33463 | Hyderabad, India.
+
+VIP RECIPIENTS DIRECTORY (ALWAYS USE THESE VERIFIED ADDRESSES):
+- Samer / Sameer / Tab: mohammadsameer.1@gmail.com
+- Bilal: mohammad.bilal24it@gmail.com
+- Kaizen: studiokaizen03@gmail.com
+- Web Client: webclient07@gmail.com
+- Suhail (Self): mdsuhailtab.1@gmail.com
+
+RECIPIENT RESOLUTION RULE:
+When Suhail asks to email or draft to someone by name, match them against this directory. NEVER guess, speculate, or hallucinate an email address. If unknown, search his past emails first.
 
 
 Personality & Tone:
@@ -384,9 +395,83 @@ def tool_clean_promotions(limit=100):
         return {"error": f"Promotion purge failed: {str(e)}"}
 
 
+def load_favorite_contacts() -> dict:
+    """Loads verified VIP contacts from contacts.json."""
+    contacts_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "contacts.json")
+    if os.path.exists(contacts_path):
+        try:
+            with open(contacts_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def resolve_recipient_email(query: str) -> tuple[str, str]:
+    """
+    Smart 3-Tier Contact Resolver:
+    1. Checks contacts.json for key/name/alias matches (e.g. 'samer', 'sameer', 'bilal', 'kaizen').
+    2. Normalizes phonetic speech-to-email strings (e.g. 'john dot doe at gmail dot com').
+    3. Searches real Gmail sent/received history to find authentic email address.
+    Returns (resolved_email, display_name).
+    """
+    if not query:
+        return "", ""
+    clean = query.strip()
+    clean_lower = clean.lower()
+
+    # Tier 1: Check contacts.json
+    contacts = load_favorite_contacts()
+    for key, data in contacts.items():
+        aliases = [key.lower(), data.get("name", "").lower()] + [a.lower() for a in data.get("aliases", [])]
+        for alias in aliases:
+            if alias and (alias == clean_lower or alias in clean_lower or clean_lower in alias):
+                return data.get("email"), data.get("name", key)
+
+    # Tier 2: Phonetic normalization (e.g., spoken "sam at example dot com")
+    phonetic = clean_lower.replace(" at ", "@").replace(" dot ", ".").replace(" underscore ", "_").replace(" hyphen ", "-").replace(" dash ", "-")
+    phonetic = re.sub(r'\s+', '', phonetic)
+    email_match = re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', phonetic)
+    if email_match:
+        extracted = email_match.group(0)
+        prefix = extracted.split("@")[0]
+        for key, data in contacts.items():
+            if key in prefix or prefix in [a.lower() for a in data.get("aliases", [])]:
+                return data.get("email"), data.get("name", key)
+        return extracted, extracted
+
+    # Tier 3: Search live Gmail history
+    try:
+        service = check_emails.get_gmail_service()
+        if service:
+            res = service.users().messages().list(userId='me', q=clean, maxResults=5).execute()
+            messages = res.get('messages', [])
+            for m in messages:
+                m_data = service.users().messages().get(userId='me', id=m['id'], format='metadata', metadataHeaders=['To', 'From']).execute()
+                headers = m_data.get('payload', {}).get('headers', [])
+                for h in headers:
+                    val = h.get('value', '')
+                    match = re.search(r'([^<]+)?<([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})>', val)
+                    if match:
+                        name_part = (match.group(1) or "").strip()
+                        email_part = match.group(2).strip()
+                        if clean_lower in name_part.lower() or clean_lower in email_part.lower():
+                            return email_part, name_part or email_part
+                    elif "@" in val and clean_lower in val.lower():
+                        return val.strip(), val.strip()
+    except Exception as e:
+        print(f"⚠️ Live contact search error: {e}")
+
+    return clean, clean
+
+
 def tool_create_draft_email(to, subject, body, attach_resume=False):
     """Creates a drafted email in Gmail."""
     try:
+        # Auto-resolve contact name or spoken address to verified email
+        resolved_to, display_name = resolve_recipient_email(to)
+        if resolved_to:
+            to = resolved_to
         service = check_emails.get_gmail_service()
         
         if attach_resume:
@@ -434,6 +519,10 @@ def tool_send_draft(draft_id):
 def tool_send_email(to, subject, body, attach_resume=False):
     """Sends an email directly through Gmail."""
     try:
+        # Auto-resolve contact name or spoken address to verified email
+        resolved_to, display_name = resolve_recipient_email(to)
+        if resolved_to:
+            to = resolved_to
         service = check_emails.get_gmail_service()
         if attach_resume:
             msg = MIMEMultipart()

@@ -1316,46 +1316,33 @@ def trigger_urgent_call_async(
 # =====================================================================
 
 KNOWN_CONTACTS = {
-    "samer": "mdsameeruddintab.1@gmail.com",
-    "sameer": "mdsameeruddintab.1@gmail.com",
+    "samer": "mohammadsameer.1@gmail.com",
+    "sameer": "mohammadsameer.1@gmail.com",
+    "bilal": "mohammad.bilal24it@gmail.com",
+    "kaizen": "studiokaizen03@gmail.com",
+    "webclient": "webclient07@gmail.com",
     "suhail": "mdsuhail.tab.1@gmail.com",
-    "tab": "mdsameeruddintab.1@gmail.com",
+    "tab": "mohammadsameer.1@gmail.com",
 }
 
 
 def resolve_contact_email(name_query: str) -> str:
-    """Resolves a dictated name or email to an actual email address."""
-    if not name_query:
-        return "mdsameeruddintab.1@gmail.com"
-    clean = name_query.lower().strip()
-    clean_norm = clean.replace(" at ", "@").replace(" dot ", ".").replace(" ", "")
-    email_match = re.search(r'[\w\.-]+@[\w\.-]+\.\w+', clean_norm)
-    if email_match:
-        return email_match.group(0)
+    """Resolves a dictated name or email to an actual email address using contacts.json and tars_agent."""
+    try:
+        import tars_agent
+        resolved, _ = tars_agent.resolve_recipient_email(name_query)
+        if resolved:
+            return resolved
+    except Exception as e:
+        print(f"⚠️ Contact resolver fallback: {e}")
 
+    if not name_query:
+        return "mohammadsameer.1@gmail.com"
+    clean = name_query.lower().strip()
     for k, v in KNOWN_CONTACTS.items():
         if k in clean:
             return v
-
-    try:
-        import check_emails
-        gmail = check_emails.get_gmail_service()
-        if gmail:
-            res = gmail.users().messages().list(userId='me', q=name_query, maxResults=3).execute()
-            messages = res.get('messages', [])
-            for m_meta in messages:
-                m_det = gmail.users().messages().get(userId='me', id=m_meta['id'], format='full').execute()
-                hdrs = check_emails.clean_email_headers(m_det)
-                from_hdr = hdrs.get('From', '')
-                e_match = re.search(r'<([^>]+)>', from_hdr)
-                if e_match:
-                    return e_match.group(1)
-                elif "@" in from_hdr:
-                    return from_hdr.strip()
-    except Exception as e:
-        print(f"⚠️ Contact search error: {e}")
-
-    return "mdsameeruddintab.1@gmail.com"
+    return clean if "@" in clean else "mohammadsameer.1@gmail.com"
 
 
 def parse_inbound_email_dictation(transcript: str) -> dict:
@@ -1404,6 +1391,16 @@ Respond ONLY with valid JSON:
 
 VOICE_AGENT_SYSTEM_PROMPT = """You are TARS, executive voice AI assistant speaking live on a telephone call with Mohammed Suhail. Always address him naturally as 'boss'.
 You have full real-time access to his Gmail via tools (search_emails, get_recent_unread_emails, read_email, create_draft_email, send_email, clean_promotions, archive_emails, trash_emails, etc.).
+
+VIP RECIPIENTS DIRECTORY (ALWAYS USE THESE VERIFIED ADDRESSES):
+- Samer / Sameer / Tab: mohammadsameer.1@gmail.com
+- Bilal: mohammad.bilal24it@gmail.com
+- Kaizen: studiokaizen03@gmail.com
+- Web Client: webclient07@gmail.com
+- Suhail (Self): mdsuhailtab.1@gmail.com
+
+CRITICAL RECIPIENT RULE:
+When Suhail asks to email someone by name (e.g. 'send email to Samer' or 'mail Bilal'), ALWAYS match them to the VIP directory above. NEVER guess or hallucinate an email address. If a contact is not in the directory, search past emails first to find their real address.
 
 CRITICAL SPOKEN VOICE RULES:
 1. Spoken Audio Only: Output PURE SPOKEN ENGLISH. NEVER output markdown symbols (no asterisks **, no bold, no bullet points, no headers, no emojis, no URLs).
