@@ -1,6 +1,6 @@
 # TARS: Autonomous AI Executive Email Agent & Inbox Chief of Staff
 > **Comprehensive Architectural Blueprint, Technical Specification, and Step-by-Step Deployment Guide**  
-> *Author: Mohammed Suhail (President, C3 Club | B.Tech IT, ISL Engineering College | Data Science Graduate, Full Stack Academy)*
+> *Author: Mohammed Suhail (Founder, C3 Club | B.E. IT, Class of 2028, ISL Engineering College | Google AI/ML Intern Grade O | Full Stack Academy Center of Excellence)*
 
 ---
 
@@ -16,6 +16,7 @@
    - [5.4 `api/telegram_webhook.py` — Serverless FastAPI Webhook](#54-apitelegram_webhookpy--serverless-fastapi-webhook)
    - [5.5 `auth_helper.py` — Headless OAuth 2.0 Credential Generator](#55-auth_helperpy--headless-oauth-20-credential-generator)
    - [5.6 `.github/workflows/scan.yml` — Cloud CI/CD Automation](#56-githubworkflowsscanyml--cloud-cicd-automation)
+   - [5.7 `sip_caller.py` & `call_server.py` — VoIP Telephony Daemon & Audio Engine](#57-sip_callerpy--call_serverpy--voip-telephony-daemon--audio-engine)
 6. [Step-by-Step Reproduction Guide (Build It Yourself)](#6-step-by-step-reproduction-guide-build-it-yourself)
    - [Step 1: Google Cloud Console & API Configuration](#step-1-google-cloud-console--api-configuration)
    - [Step 2: Generate OAuth Refresh Token via `auth_helper.py`](#step-2-generate-oauth-refresh-token-via-auth_helperpy)
@@ -30,7 +31,17 @@
 10. [Maintenance & Troubleshooting](#10-maintenance--troubleshooting)
 11. [Voice Calling Upgrade: TARS Voice Sentinel (WebRTC / PWA Engine)](#11-voice-calling-upgrade-tars-voice-sentinel-webrtc--pwa-engine)
 12. [Comparative Analysis: Why Ditching n8n Cloud & Cellular Telephony Wins](#12-comparative-analysis-why-ditching-n8n-cloud--cellular-telephony-wins)
-13. [Native Android SIP Push Calling Architecture (Zero-Tab Lockscreen Engine)](#13-native-android-sip-push-calling-architecture-zero-tab-lockscreen-engine)
+13. [Native Android SIP Push Calling & Conversational Voice RAG Engine](#13-native-android-sip-push-calling--conversational-voice-rag-engine)
+   - [13.1 Overcoming the "Open Browser Tab" Dilemma](#131-overcoming-the-open-browser-tab-dilemma)
+   - [13.2 SIP Protocol Flow & Digest Authentication](#132-sip-protocol-flow--digest-authentication)
+   - [13.3 Implementation Details (`sip_caller.py`)](#133-implementation-details-sip_callerpy)
+   - [13.4 Bidirectional Jarvis Voice AI Loop (Outbound Urgent Dialing)](#134-bidirectional-jarvis-voice-ai-loop-outbound-urgent-dialing)
+   - [13.5 Inbound Dial-In Engine (Calling TARS Directly from Linphone)](#135-inbound-dial-in-engine-calling-tars-directly-from-linphone)
+   - [13.6 Resolving '0/null' Immediate Disconnects via SDES-SRTP Encryption](#136-resolving-0null-immediate-disconnects-via-sdes-srtp-encryption)
+   - [13.7 Eliminating Red Quality Bars: The Full-Duplex Comfort Silence Streamer](#137-eliminating-red-quality-bars-the-full-duplex-comfort-silence-streamer)
+   - [13.8 STUN Binding Responder & Asymmetric ICE Unblocking](#138-stun-binding-responder--asymmetric-ice-unblocking)
+   - [13.9 J.A.R.V.I.S. Persona Overhaul: RyanNeural Voice, 0ms Cache & Spoken Formatting](#139-jarvis-persona-overhaul-ryanneural-voice-0ms-cache--spoken-formatting)
+   - [13.10 Live Voice RAG Workflow: Multi-Turn Gmail Triage Over the Phone](#1310-live-voice-rag-workflow-multi-turn-gmail-triage-over-the-phone)
 
 
 ---
@@ -113,6 +124,10 @@ graph TD
 | **Chat Command Center** | **Telegram Bot API** | Bidirectional webhook handling inline interactive buttons (`callback_data`), code blocks, and markdown formatting. |
 | **Spreadsheet Engine** | **openpyxl** | Pure-Python Excel parser reading `.xlsx` and `.xls` workbooks sheet-by-sheet into Markdown data tables. |
 | **Document Parsers** | **pypdf / python-docx** | Pure-Python document parsing extracting textual data and tables from `.pdf` and `.docx` attachments. |
+| **VoIP SIP Telephony** | **Linphone Flexisip / RFC 2617** | Native Android SIP push calling engine running on port 5060 with MD5 Digest Auth and FCM wakeup. |
+| **Media Encryption** | **pylibsrtp (SDES-SRTP)** | Cryptographic audio channel using `AES_CM_128_HMAC_SHA1_80` for secure, zero-rejection VoIP transport. |
+| **Speech Synthesis (TTS)** | **Edge-TTS (en-GB-RyanNeural)** | Studio-grade J.A.R.V.I.S. British AI persona tuned at `-1Hz` pitch and `-2%` rate, converted to 8kHz $\mu$-law. |
+| **Speech-to-Text (STT)** | **Groq Whisper (large-v3-turbo)** | Sub-200ms spoken audio transcription for real-time mobile voice RAG. |
 
 ---
 
@@ -234,6 +249,16 @@ It outputs `token.json` containing the permanent `refresh_token`, which is then 
 Runs on GitHub's Ubuntu runners:
 - `cron: '*/5 * * * *'`: Executes `python check_emails.py` every 5 minutes for real-time triage.
 - `cron: '30 14 * * *'`: Executes `python check_emails.py --digest` at 2:30 PM UTC (8:00 PM IST) to send the daily digest.
+
+---
+
+### 5.7 `sip_caller.py` & `call_server.py` — VoIP Telephony Daemon & Audio Engine
+Provides full-duplex VoIP SIP calling to and from your smartphone at zero cost:
+- **Port 5060 Inbound Listener:** Listens for SIP INVITE signals from Linphone when you dial `suhail_tars`.
+- **Port 8080 FastAPI Server:** Provides WebSocket & WebRTC calling endpoints, mobile web controls, and local administration.
+- **SDES-SRTP Crypto Channel:** Negotiates secure media keys (`AES_CM_128_HMAC_SHA1_80`) using `pylibsrtp` to prevent call drops.
+- **Continuous Comfort Streamer:** Transmits digital silence packets during listening turns so the phone's jitter buffer stays locked in green status.
+- **Voice RAG Engine:** Bridges live microphone audio to Groq Whisper and queries Gmail via autonomous tool calling in real time.
 
 ---
 
@@ -547,7 +572,7 @@ Ditching `n8n.cloud` and commercial telephony in favor of a **standalone custom 
 
 ---
 
-## 13. Native Android SIP Push Calling Architecture (Zero-Tab Lockscreen Engine)
+## 13. Native Android SIP Push Calling & Conversational Voice RAG Engine
 
 ### 13.1 Overcoming the "Open Browser Tab" Dilemma
 While WebRTC PWAs allow rapid cross-platform deployment, mobile operating systems (particularly Android and iOS) actively kill background browser tabs and WebSocket connections to preserve battery life when the phone is locked inside a pocket. Keeping an active screen awake drains battery in hours.
@@ -610,7 +635,7 @@ sequenceDiagram
 - **Direct Edge-TTS to G.711 u-law Transcoder:** Spoken alerts are converted into 8kHz 16-bit mono PCM via `miniaudio` and compressed into G.711 u-law (`audioop.lin2ulaw`) within 200ms, streaming standard 160-byte RTP packets every 20ms.
 - **Asynchronous Detached Dispatcher:** When an urgent email arrives in `check_emails.py`, the voice dialer launches in a daemonized background thread (`trigger_urgent_call_async()`), ensuring Telegram alert delivery and automated draft generation are never blocked.
 
-### 13.4 Bidirectional Jarvis Voice AI Loop (Groq Whisper + Autonomous Execution)
+### 13.4 Bidirectional Jarvis Voice AI Loop (Outbound Urgent Dialing)
 When Mohammed Suhail answers the incoming call on his Android phone:
 1. **Jarvis Spoken Briefing:** TARS introduces the urgent email and states who sent it and what they need.
 2. **Intercom Prompt Tone:** A crisp 200ms 800Hz chime plays, switching TARS into active listening mode.
@@ -619,6 +644,100 @@ When Mohammed Suhail answers the incoming call on his Android phone:
 5. **Autonomous Gmail API Dispatch:** If the user speaks "Confirm", "Okay", "Send it", or dictates custom instructions (e.g. "Tell them I will meet on Sunday"), TARS executes the personalized reply, attaches `Mohammed_Suhail_Resume.pdf`, and dispatches the email via Gmail API immediately.
 6. **Live Spoken Confirmation:** TARS speaks back over the call: *"Affirmative Commander. Your reply has been sent and your resume is attached. Have a great day!"*
 7. **Clean Disconnect & Telegram Report:** TARS sends SIP `BYE` to cleanly hang up the phone call, and broadcasts an executive summary to Suhail's Telegram bot with the complete transcript.
+
+---
+
+### 13.5 Inbound Dial-In Engine (Calling TARS Directly from Linphone)
+In addition to outbound urgent alerts, TARS features a permanent **Inbound SIP Voice Listener** bound to UDP port 5060:
+- **Permanent Registration:** The daemon authenticates with `sip.linphone.org` as `suhail_tars` using an automated 60-second SIP REGISTER refresh loop.
+- **Zero-Wait Auto-Answer:** When Mohammed Suhail dials `suhail_tars` from his Android Linphone app, TARS receives the inbound SIP INVITE, extracts caller credentials, generates an SDP Answer, and sends `SIP/2.0 200 OK` within 50ms.
+- **Greeting & Readiness:** Plays a pre-cached greeting (*"Hello boss, TARS online. How can I help you today?"*) followed by an audio chime, immediately ready for spoken commands.
+
+---
+
+### 13.6 Resolving '0/null' Immediate Disconnects via SDES-SRTP Encryption
+Modern mobile Linphone clients enforce mandatory **Secure Real-time Transport Protocol (SRTP)** encryption. Early plain RTP implementations were rejected immediately with `0/null correspondent has ended the call`.
+
+**The Solution:**
+TARS embeds `pylibsrtp` to negotiate RFC 4568 SDES-SRTP:
+1. Parses the incoming SDP offer for `a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:<client_key>`.
+2. Generates a secure 30-byte local base64 master key and salt.
+3. Responds with `a=crypto:2 AES_CM_128_HMAC_SHA1_80 inline:<server_key>`.
+4. Initializes dual cryptographic sessions:
+   - `tx_srtp.protect(rtp_bytes)`: Encrypts outbound spoken audio sent to the phone.
+   - `rx_srtp.unprotect(encrypted_bytes)`: Decrypts microphone audio received from the phone.
+
+---
+
+### 13.7 Eliminating Red Quality Bars: The Full-Duplex Comfort Silence Streamer
+On mobile SIP connections, silent gaps between conversational turns can cause Linphone's adaptive jitter buffer to assume packet loss, resulting in audio glitches and quality degradation (indicator dropping to red).
+
+**The Comfort Silence Streamer:**
+Implemented in `sip_caller.py` via `RTPPlayer.start_silence_stream()`:
+- While TARS is listening to Suhail speak, a background worker streams continuous G.711 $\mu$-law silence packets (`0xFF`, 160 bytes, 20ms pacing) to the phone.
+- Keeps the downstream UDP NAT pinhole open and maintains Linphone's jitter buffer in solid green status.
+- Automatically yields when TARS begins speaking synthetic speech or acoustic fillers.
+
+---
+
+### 13.8 STUN Binding Responder & Asymmetric ICE Unblocking
+When mobile clients use ICE (Interactive Connectivity Establishment) behind NAT, Linphone transmits RFC 5389 STUN Binding Requests to discover server reflexivity:
+- `sip_caller.py` implements `handle_stun_packet()` directly on the RTP socket.
+- Computes `XOR-MAPPED-ADDRESS`, signs the packet with `MESSAGE-INTEGRITY` (HMAC-SHA1), and appends `FINGERPRINT` (CRC32).
+- Returns `STUN Binding Success Response` within 2ms.
+- Linphone unblocks media transmission immediately without waiting for complex reverse STUN traversal.
+
+---
+
+### 13.9 J.A.R.V.I.S. Persona Overhaul: RyanNeural Voice, 0ms Cache & Spoken Formatting
+To eliminate Victorian or aged vocal cadences, TARS's speech synthesis stack was overhauled:
+
+```python
+# Young, crisp British AI Voice Persona (Marvel's J.A.R.V.I.S. in his 30s)
+VOICE_MODEL = "en-GB-RyanNeural"
+VOICE_PITCH = "-1Hz"   # Refined mid-baritone resonance
+VOICE_RATE = "-2%"     # Composed, unflappable cadence
+```
+
+1. **0ms Acoustic Fillers:** Phrases like `"Checking that for you now, boss."`, `"On it boss, drafting that now."`, and `"Sending it right now, boss."` are pre-synthesized into 8kHz `.ulaw` files in `_audio_cache/`. Playback starts in under 0.001s, eliminating awkward silence while tools execute.
+2. **Spoken Text Sanitization (`clean_spoken_text`):**
+   - Strips all markdown syntax (`**`, `_`, `#`, backticks, bullet symbols).
+   - Converts URLs and links into spoken phrasing.
+   - Converts em-dashes and hyphens into commas for natural breathing pauses.
+   - Restricts spoken responses strictly to 1–3 digestible sentences.
+
+---
+
+### 13.10 Live Voice RAG Workflow: Multi-Turn Gmail Triage Over the Phone
+During an active call, TARS operates as a full conversational RAG agent:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Boss as Mohammed Suhail (on phone)
+    participant Mic as Inbound RTP (G.711 u-law)
+    participant Whisper as Groq Whisper API (<200ms)
+    participant Brain as TARS Brain (execute_voice_rag_turn)
+    participant Gmail as Gmail API
+    participant TTS as Edge-TTS (RyanNeural)
+
+    Boss->>Mic: "Did I get any email from Samer?"
+    Mic->>Whisper: Transcribes audio buffer
+    Whisper-->>Brain: "Did I get any email from Samer?"
+    Note over Brain: Plays 0ms filler: "Checking that for you now, boss."
+    Brain->>Gmail: tool_search_emails(query="from:samer")
+    Gmail-->>Brain: Returns 3 emails (Subject, Date, Body snippet)
+    Brain->>Brain: Synthesizes 2-sentence conversational briefing
+    Brain->>TTS: Synthesizes RyanNeural 8kHz audio
+    TTS-->>Boss: "Yes boss, Samer sent an email regarding your interview schedule. Would you like me to draft a reply with your resume attached?"
+    
+    Boss->>Mic: "Yes, send it right away."
+    Mic->>Whisper: Transcribes: "Yes, send it right away."
+    Brain->>Gmail: tool_create_draft_email(attach_resume=True) + tool_send_email()
+    Gmail-->>Brain: Success (Email dispatched with Mohammed_Suhail_Resume.pdf)
+    Brain->>TTS: Synthesizes confirmation
+    TTS-->>Boss: "Sent boss! Anything else I can help with?"
+```
 
 ---
 
