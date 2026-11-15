@@ -407,11 +407,97 @@ def load_favorite_contacts() -> dict:
     return {}
 
 
+def clean_and_repair_email_address(raw: str) -> tuple[str, bool, str]:
+    """
+    Cleans, repairs, and validates dictated email addresses against accent distortions,
+    broken punctuation (e.g. '.@' or '@.'), spoken symbol words, number words, and domain typos.
+    Returns (repaired_email, is_valid, status_msg).
+    """
+    if not raw:
+        return "", False, "Empty address"
+
+    text = raw.lower().strip()
+
+    # 1. Spoken symbols & phrases to standard characters
+    text = re.sub(r'\bat the rate of\b|\bat the rate\b|\bat\b', '@', text)
+    text = re.sub(r'\bdot\b|\bdat\b|\bdott\b', '.', text)
+    text = re.sub(r'\bunderscore\b|\bunder score\b', '_', text)
+    text = re.sub(r'\bhyphen\b|\bdash\b|\bminus\b', '-', text)
+
+    # 2. Number word normalization
+    tens_units = {
+        "twenty one": "21", "twenty two": "22", "twenty three": "23", "twenty four": "24", "twenty five": "25",
+        "twenty six": "26", "twenty seven": "27", "twenty eight": "28", "twenty nine": "29",
+        "thirty one": "31", "thirty two": "32", "thirty three": "33", "thirty four": "34", "thirty five": "35",
+        "double zero": "00", "double one": "11", "double two": "22", "double three": "33"
+    }
+    for phrase, num in tens_units.items():
+        text = re.sub(r'\b' + phrase + r'\b', num, text)
+
+    singles = {
+        "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
+        "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
+        "ten": "10", "eleven": "11", "twelve": "12", "thirteen": "13",
+        "fourteen": "14", "fifteen": "15", "sixteen": "16", "seventeen": "17",
+        "eighteen": "18", "nineteen": "19", "twenty": "20", "thirty": "30",
+        "forty": "40", "fifty": "50"
+    }
+    for word, digit in singles.items():
+        text = re.sub(r'\b' + word + r'\b', digit, text)
+
+    # 3. Strip all internal whitespaces
+    text = re.sub(r'\s+', '', text)
+
+    # 4. Handle multiple @ signs - keep last valid domain split
+    if text.count('@') > 1:
+        parts = text.split('@')
+        text = ".".join(parts[:-1]) + "@" + parts[-1]
+
+    if '@' not in text:
+        return text, False, "Missing @ symbol"
+
+    local_part, domain_part = text.split('@', 1)
+
+    # 5. Fix common local-part punctuation errors
+    local_part = re.sub(r'[._\-]+$', '', local_part)      # No trailing dot before @
+    local_part = re.sub(r'^[._\-]+', '', local_part)      # No leading dot
+    local_part = re.sub(r'\.{2,}', '.', local_part)       # Collapse multiple dots
+    local_part = re.sub(r'_{2,}', '_', local_part)
+    local_part = re.sub(r'[^a-z0-9._\-+]', '', local_part)
+
+    # 6. Fix common domain-part punctuation errors
+    domain_part = re.sub(r'^[._\-]+', '', domain_part)    # No leading dot after @
+    domain_part = re.sub(r'[._\-]+$', '', domain_part)    # No trailing dot
+    domain_part = re.sub(r'\.{2,}', '.', domain_part)
+    domain_part = re.sub(r'[^a-z0-9.\-]', '', domain_part)
+
+    # 7. Auto-repair known domains & typos
+    if domain_part.startswith(("gmai", "gmal", "gemail")):
+        domain_part = "gmail.com"
+    elif domain_part.startswith(("outlok", "outluk", "hotmial", "hotmai")):
+        domain_part = "outlook.com"
+    elif domain_part.startswith(("yaho", "ymail")):
+        domain_part = "yahoo.com"
+    elif domain_part.startswith("icloud"):
+        domain_part = "icloud.com"
+
+    # Missing top-level domain fallback
+    if '.' not in domain_part:
+        if domain_part in ["gmail", "outlook", "yahoo", "hotmail", "icloud"]:
+            domain_part += ".com"
+
+    repaired = f"{local_part}@{domain_part}"
+    is_valid = bool(re.match(r'^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$', repaired))
+    status = "valid" if is_valid else "malformed_domain_or_syntax"
+
+    return repaired, is_valid, status
+
+
 def resolve_recipient_email(query: str) -> tuple[str, str]:
     """
     Smart 3-Tier Contact Resolver:
     1. Checks contacts.json for key/name/alias matches (e.g. 'samer', 'sameer', 'bilal', 'kaizen').
-    2. Normalizes phonetic speech-to-email strings (e.g. 'john dot doe at gmail dot com').
+    2. Runs clean_and_repair_email_address to fix spoken symbols, dots before @, number words, and domain typos.
     3. Searches real Gmail sent/received history to find authentic email address.
     Returns (resolved_email, display_name).
     """
@@ -428,17 +514,15 @@ def resolve_recipient_email(query: str) -> tuple[str, str]:
             if alias and (alias == clean_lower or alias in clean_lower or clean_lower in alias):
                 return data.get("email"), data.get("name", key)
 
-    # Tier 2: Phonetic normalization (e.g., spoken "sam at example dot com")
-    phonetic = clean_lower.replace(" at ", "@").replace(" dot ", ".").replace(" underscore ", "_").replace(" hyphen ", "-").replace(" dash ", "-")
-    phonetic = re.sub(r'\s+', '', phonetic)
-    email_match = re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', phonetic)
-    if email_match:
-        extracted = email_match.group(0)
-        prefix = extracted.split("@")[0]
+    # Tier 2: Clean and repair spoken / phonetic email addresses
+    repaired, is_valid, status = clean_and_repair_email_address(clean)
+    if is_valid:
+        # Check if the repaired email matches any contact prefix
+        prefix = repaired.split("@")[0].lower()
         for key, data in contacts.items():
             if key in prefix or prefix in [a.lower() for a in data.get("aliases", [])]:
                 return data.get("email"), data.get("name", key)
-        return extracted, extracted
+        return repaired, repaired
 
     # Tier 3: Search live Gmail history
     try:
