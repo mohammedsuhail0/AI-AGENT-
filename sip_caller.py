@@ -47,11 +47,52 @@ import miniaudio
 import audioop
 from groq import Groq
 import base64
+import hmac
+import zlib
 try:
     import pylibsrtp
     HAVE_SRTP = True
 except ImportError:
     HAVE_SRTP = False
+
+def handle_stun_packet(data: bytes, addr: tuple, sock: socket.socket, ice_pwd: str = "tarspassword12345678") -> bool:
+    """
+    RFC 5389 / RFC 5245 STUN Binding Success Responder.
+    Instantly satisfies WebRTC / Linphone ICE connectivity checks on the RTP socket!
+    """
+    if len(data) < 20:
+        return False
+    msg_type, msg_len = struct.unpack("!HH", data[:4])
+    magic = data[4:8]
+    if msg_type == 0x0001 and magic == b"\x21\x12\xa4\x42":
+        trans_id = data[8:20]
+        try:
+            ip_parts = [int(p) for p in addr[0].split(".")]
+            raw_ip = (ip_parts[0] << 24) | (ip_parts[1] << 16) | (ip_parts[2] << 8) | ip_parts[3]
+            x_port = addr[1] ^ 0x2112
+            x_ip = raw_ip ^ 0x2112A442
+            xor_mapped = struct.pack("!HHBBHII", 0x0020, 8, 0, 1, x_port, (x_ip >> 16) & 0xFFFF, x_ip & 0xFFFF)
+            
+            attr_len_with_mi = len(xor_mapped) + 24
+            header_for_mi = struct.pack("!HHI", 0x0101, attr_len_with_mi, 0x2112A442) + trans_id
+            msg_to_sign = header_for_mi + xor_mapped
+            mi_hash = hmac.new(ice_pwd.encode(), msg_to_sign, hashlib.sha1).digest()
+            mi_attr = struct.pack("!HH", 0x0008, 20) + mi_hash
+            
+            full_body = xor_mapped + mi_attr
+            attr_len_with_fp = len(full_body) + 8
+            header_final = struct.pack("!HHI", 0x0101, attr_len_with_fp, 0x2112A442) + trans_id
+            msg_for_fp = header_final + full_body
+            crc = (zlib.crc32(msg_for_fp) & 0xFFFFFFFF) ^ 0x5354554e
+            fp_attr = struct.pack("!HHI", 0x8028, 4, crc)
+            
+            resp = header_final + full_body + fp_attr
+            sock.sendto(resp, addr)
+            print(f"⚡ Replied to STUN Binding Request from {addr} (ICE check passed!)")
+            return True
+        except Exception as e:
+            print(f"⚠️ STUN handler error: {e}")
+    return False
 
 # Set Windows multimedia timer resolution to 1ms for studio-grade low jitter
 try:
@@ -82,9 +123,9 @@ groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-VOICE_MODEL = "en-GB-ThomasNeural"  # Marvel's JARVIS British Voice (Crisp, refined, Paul Bettany)
-VOICE_PITCH = "+0Hz"                # Studio natural pitch - crisp, zero distortion
-VOICE_RATE = "+0%"                  # Natural, clear conversational cadence (eliminates fast/rushed speech)
+VOICE_MODEL = "en-GB-RyanNeural"  # Young, crisp British voice (eliminates old-man sound)
+VOICE_PITCH = "-1Hz"              # Refined mid-baritone resonance
+VOICE_RATE = "-2%"                # Composed, unflappable Jarvis cadence
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_audio_cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 _SIP_CALL_LOCK = threading.Lock()
@@ -178,9 +219,36 @@ def make_rtp_packet(seq, timestamp, ssrc, payload, marker=False, pt=0):
     return header + payload
 
 
+def clean_spoken_text(text: str) -> str:
+    """Sanitizes text for speech synthesis: strips markdown, bullets, URLs, and enforces strictly 1-3 spoken sentences with natural punctuation."""
+    if not text:
+        return ""
+    # Convert markdown links [text](url) -> text
+    text = re.sub(r'\[([^\]]+)\]\([^\)]*\)', r'\1', text)
+    # Strip standalone URLs
+    text = re.sub(r'https?://\S+|www\.\S+', '', text)
+    # Strip markdown formatting: *, _, #, `, ~, >, |, bullet symbols
+    text = re.sub(r'[*_#`~>|•]', ' ', text)
+    # Remove bullet list markers like "- ", "+ " at start of lines or after punctuation
+    text = re.sub(r'(?:^|(?<=[.!?:\s]))[-+*]\s+', '', text)
+    # Remove numbering like "1. ", "2) " anywhere after start of line or punctuation/whitespace
+    text = re.sub(r'(?:^|(?<=[.!?:\s]))\d+[\.\)]\s+', '', text)
+    # Convert double dashes or em-dashes to commas for breathing pauses
+    text = re.sub(r'—|–|--', ', ', text)
+    # Normalize multiple whitespace and clean up punctuation spacing
+    text = re.sub(r'\s+', ' ', text).strip()
+    text = re.sub(r'\s+([,.!?])', r'\1', text)
+    # Enforce strictly 1-3 sentences maximum
+    sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if s.strip()]
+    if len(sentences) > 3:
+        text = " ".join(sentences[:3])
+    return text
+
+
 async def generate_speech_ulaw(text: str, rate: str = VOICE_RATE, pitch: str = VOICE_PITCH) -> bytes:
-    """Synthesizes high-fidelity speech using Edge-TTS configured for Marvel's JARVIS (Paul Bettany) and converts to 8kHz u-law."""
+    """Synthesizes high-fidelity speech using Edge-TTS configured for Marvel's JARVIS (en-GB-RyanNeural) and converts to 8kHz u-law."""
     try:
+        text = clean_spoken_text(text)
         comm = edge_tts.Communicate(text, VOICE_MODEL, rate=rate, pitch=pitch)
         chunks = [c["data"] async for c in comm.stream() if c["type"] == "audio"]
         mp3_data = b"".join(chunks)
@@ -233,16 +301,52 @@ class RTPPlayer:
     """Maintains RFC 3550 / RFC 3551 continuous wall-clock timestamps and monotonic sequence numbers with sub-millisecond frame pacing."""
     def __init__(self, rtp_sock, destinations, ssrc=0x34A8129B, srtp_session=None):
         self.rtp_sock = rtp_sock
-        self.destinations = destinations
-        self.ssrc = ssrc if ssrc is not None else random.randint(0x10000000, 0xEFFFFFFF)
+        self.destinations = list(destinations) if destinations else []
+        self.ssrc = ssrc if ssrc is not None else 0x34A8129B
         self.srtp_session = srtp_session
         self.seq = random.randint(1000, 25000)
         self.session_t0 = time.perf_counter()
         self.base_ts = random.randint(10000, 200000)
+        self._silence_running = False
+        self._silence_thread = None
+
+    def start_silence_stream(self):
+        """Streams continuous RFC 3550 silence frames (20ms, 0xFF u-law) during listening periods so Linphone's quality bar stays full green."""
+        if self._silence_running:
+            return
+        self._silence_running = True
+        def _silence_worker():
+            chunk = b"\xff" * 160
+            while self._silence_running:
+                t_now = time.perf_counter()
+                elapsed_sec = t_now - self.session_t0
+                frame_ts = (self.base_ts + int(elapsed_sec * 8000)) & 0xFFFFFFFF
+                pkt = make_rtp_packet(self.seq, frame_ts, self.ssrc, chunk, marker=False)
+                if self.srtp_session:
+                    try:
+                        pkt = self.srtp_session.protect(pkt)
+                    except Exception:
+                        pass
+                for target_ip, target_port in list(self.destinations):
+                    try:
+                        self.rtp_sock.sendto(pkt, (target_ip, target_port))
+                    except Exception:
+                        pass
+                self.seq = (self.seq + 1) & 0xFFFF
+                time.sleep(0.020)
+        self._silence_thread = threading.Thread(target=_silence_worker, daemon=True, name="RTP-Silence-Stream")
+        self._silence_thread.start()
+
+    def stop_silence_stream(self):
+        self._silence_running = False
+        t = getattr(self, '_silence_thread', None)
+        if t and t.is_alive():
+            t.join(timeout=0.04)
 
     def play(self, ulaw_data):
         if not ulaw_data or not self.destinations:
             return
+        self.stop_silence_stream()
         chunk_size = 160
         chunks_count = (len(ulaw_data) + chunk_size - 1) // chunk_size
         
@@ -285,6 +389,9 @@ class RTPPlayer:
                 if rem > 0.002:
                     time.sleep(0.001)
 
+        # Resume comfort silence immediately so peer buffer stays continuously primed & green
+        self.start_silence_stream()
+
 
 def stream_audio(rtp_sock, destinations, ulaw_data, repeat=1, ssrc=0x34A8129B):
     """Convenience wrapper for legacy calls."""
@@ -295,10 +402,10 @@ def stream_audio(rtp_sock, destinations, ulaw_data, repeat=1, ssrc=0x34A8129B):
 
 def select_best_rtp_destination(sdp_text: str) -> list[tuple[str, int]]:
     """
-    Parses SDP to extract ONLY audio stream component 1 (RTP audio, strictly ignoring video and RTCP).
-    Selects the single best destination to avoid packet duplication, jitter drops, and comb filtering.
+    Parses SDP to extract audio stream endpoints.
+    Returns prioritized destinations [LAN, WAN] so initial talkspurts arrive immediately,
+    while symmetric RTP automatically locks onto the active socket once packets flow.
     """
-    # Isolate ONLY the m=audio section to prevent picking up video RTP ports/candidates
     audio_section = sdp_text
     m_audio = re.search(r'(m=audio\s+[^\r\n]+(?:[\r\n]+(?!m=)[^\r\n]+)*)', sdp_text, re.IGNORECASE)
     if m_audio:
@@ -316,25 +423,28 @@ def select_best_rtp_destination(sdp_text: str) -> list[tuple[str, int]]:
     if c_ip and m_port:
         pair = (c_ip.group(1).strip(), int(m_port.group(1)))
         if pair not in destinations:
-            destinations.insert(0, pair)
+            destinations.append(pair)
 
     lan_dests = [d for d in destinations if d[0].startswith(("192.168.", "10.", "172."))]
-    if lan_dests:
-        print(f"🎯 Selected single Wi-Fi Audio RTP endpoint: {lan_dests[0]} (Zero packet duplication, studio clean)")
-        return [lan_dests[0]]
+    wan_dests = [d for d in destinations if not d[0].startswith(("192.168.", "10.", "172."))]
 
-    if destinations:
-        print(f"🎯 Selected single WAN Audio RTP endpoint: {destinations[0]}")
-        return [destinations[0]]
-        
-    return []
+    res = []
+    if lan_dests:
+        res.append(lan_dests[0])
+    if wan_dests:
+        res.append(wan_dests[0])
+    if not res and destinations:
+        res = destinations[:1]
+
+    print(f"🎯 Audio RTP initial endpoints: {res} (Direct + Relay dual-armed)")
+    return res
 
 
 def build_sdp_offer(local_ip: str, public_ip: str, local_rtp_port: int, is_lan: bool = True) -> str:
     """
     Constructs an RFC 3264 / RFC 3551 compliant Early Offer SDP.
     Offers audio only with PCMU (0), PCMA (8), and telephone-event (101).
-    Includes ICE candidate lines for both LAN host and WAN srflx.
+    Includes direct host/srflx candidates without bidirectional ICE overhead.
     """
     adv_ip = local_ip if is_lan else public_ip
     sdp = (
@@ -344,9 +454,13 @@ def build_sdp_offer(local_ip: str, public_ip: str, local_rtp_port: int, is_lan: 
         f"c=IN IP4 {adv_ip}\r\n"
         "t=0 0\r\n"
         f"m=audio {local_rtp_port} RTP/AVP 0 8 101\r\n"
+        f"c=IN IP4 {adv_ip}\r\n"
         "a=rtpmap:0 PCMU/8000\r\n"
         "a=rtpmap:8 PCMA/8000\r\n"
         "a=rtpmap:101 telephone-event/8000\r\n"
+        f"a=rtcp:{local_rtp_port}\r\n"
+        "a=rtcp-mux\r\n"
+        "a=ssrc:883438235 cname:tars\r\n"
         f"a=candidate:1 1 UDP 2130706431 {local_ip} {local_rtp_port} typ host\r\n"
         f"a=candidate:2 1 UDP 1694498815 {public_ip} {local_rtp_port} typ srflx\r\n"
         "a=sendrecv\r\n"
@@ -357,7 +471,7 @@ def build_sdp_offer(local_ip: str, public_ip: str, local_rtp_port: int, is_lan: 
 def build_sdp_answer(offer_sdp: str, local_ip: str, public_ip: str, local_rtp_port: int, is_lan: bool = True) -> tuple[str, any, any]:
     """
     Constructs an RFC 3264 / RFC 4568 compliant SDP answer matching the exact number and order of m= lines in the offer.
-    Supports both plain RTP (RTP/AVP) and SRTP (RTP/SAVP / RTP/SAVPF).
+    Supports SRTP (RTP/SAVPF) with direct Wi-Fi host candidate and instant STUN response support.
     Returns (sdp_answer_str, tx_srtp_session, rx_srtp_session).
     """
     adv_ip = local_ip if is_lan else public_ip
@@ -368,12 +482,6 @@ def build_sdp_answer(offer_sdp: str, local_ip: str, public_ip: str, local_rtp_po
         f"c=IN IP4 {adv_ip}",
         "t=0 0"
     ]
-
-    # Check for BUNDLE and mid in offer
-    mid_m = re.search(r'a=mid:([^\r\n]+)', offer_sdp)
-    mid_val = mid_m.group(1).strip() if mid_m else None
-    if "a=group:BUNDLE" in offer_sdp and mid_val:
-        sdp_lines.append(f"a=group:BUNDLE {mid_val}")
 
     # Check for SRTP in offer (AES_CM_128_HMAC_SHA1_80)
     tx_srtp, rx_srtp = None, None
@@ -416,16 +524,17 @@ def build_sdp_answer(offer_sdp: str, local_ip: str, public_ip: str, local_rtp_po
                 codecs.append(te_pt)
             codecs_str = " ".join(codecs)
             sdp_lines.append(f"m=audio {local_rtp_port} {ans_proto} {codecs_str}")
+            sdp_lines.append(f"c=IN IP4 {adv_ip}")
             if crypto_answer_line:
                 sdp_lines.append(crypto_answer_line)
             sdp_lines.append("a=rtpmap:0 PCMU/8000")
             sdp_lines.append("a=rtpmap:8 PCMA/8000")
             if te_pt:
                 sdp_lines.append(f"a=rtpmap:{te_pt} telephone-event/8000")
+            sdp_lines.append(f"a=rtcp:{local_rtp_port}")
             if "a=rtcp-mux" in offer_sdp:
                 sdp_lines.append("a=rtcp-mux")
-            if mid_val:
-                sdp_lines.append(f"a=mid:{mid_val}")
+            sdp_lines.append("a=ssrc:883438235 cname:tars")
             sdp_lines.append(f"a=candidate:1 1 UDP 2130706431 {local_ip} {local_rtp_port} typ host")
             sdp_lines.append(f"a=candidate:2 1 UDP 1694498815 {public_ip} {local_rtp_port} typ srflx")
             sdp_lines.append("a=sendrecv")
@@ -591,11 +700,24 @@ def record_user_speech(rtp_sock, max_seconds=15.0, silence_timeout=1.8, player=N
     while time.time() - start_time < max_seconds:
         try:
             data, sender_addr = rtp_sock.recvfrom(2048)
+            # Handle WebRTC / Linphone ICE STUN checks instantly
+            if handle_stun_packet(data, sender_addr, rtp_sock):
+                continue
+
+            # Filter RTCP multiplexed control packets (RFC 5761 PT 200..206)
+            if len(data) >= 2 and (data[1] & 0x7F) in (200, 201, 202, 203, 204, 205, 206):
+                continue
+
             if srtp_session:
                 try:
-                    data = srtp_session.unprotect(data)
+                    dec = srtp_session.unprotect(data)
+                    data = dec
                 except Exception:
-                    continue
+                    # Fallback: if raw packet is already valid unencrypted RTP version 2
+                    if len(data) >= 12 and (data[0] >> 6) == 2 and (data[1] & 0x7F) in (0, 8, 96, 97, 98, 100, 101):
+                        pass
+                    else:
+                        continue
 
             if len(data) < 12:
                 continue
@@ -623,7 +745,7 @@ def record_user_speech(rtp_sock, max_seconds=15.0, silence_timeout=1.8, player=N
                 continue
             
             # 1. Check for DTMF (telephone-event)
-            if pt == 101:
+            if pt in (100, 101):
                 event_code = payload[0]
                 if event_code <= 9:
                     dtmf_digit = str(event_code)
@@ -650,7 +772,7 @@ def record_user_speech(rtp_sock, max_seconds=15.0, silence_timeout=1.8, player=N
                 frames.append(linear)
                 rms = audioop.rms(linear, 2)
                 
-                if rms > 250:
+                if rms > 180:
                     if not speech_detected:
                         speech_detected = True
                         print(f"🎙️ User speech detected on microphone (rms={rms})")
@@ -1284,13 +1406,14 @@ VOICE_AGENT_SYSTEM_PROMPT = """You are TARS, executive voice AI assistant speaki
 You have full real-time access to his Gmail via tools (search_emails, get_recent_unread_emails, read_email, create_draft_email, send_email, clean_promotions, archive_emails, trash_emails, etc.).
 
 CRITICAL SPOKEN VOICE RULES:
-1. Spoken Audio Only: Output PURE SPOKEN ENGLISH. NEVER output markdown (no asterisks **, no bullet points, no headers, no emojis, no URLs).
-2. Concise & Direct: Keep responses between 2 and 4 sentences so Suhail can digest it easily over the phone.
-3. Live Gmail RAG: When Suhail asks if he received any emails (e.g. from Samer, unread emails, interview updates), call search_emails or get_recent_unread_emails, extract key info (who, when, subject, summary), and report it clearly.
-4. Next Steps: Always conclude by asking the natural next action (e.g. 'Would you like me to read the full message, or draft a reply with your resume attached?').
-5. Sending Emails: If Suhail asks to reply or send an email, call create_draft_email or prepare the message, describe it briefly, and ask: 'Shall I send that now, boss?'.
-6. Confirming Send: If Suhail confirms ('yes', 'send it', 'do it'), call send_email or send_draft immediately, and confirm: 'Sent boss! Anything else I can help with?'.
-7. Farewell: If Suhail says 'that is all', 'thanks', 'goodbye', or 'bye', reply with a warm closing like 'Always at your service boss, have a great day!' and append '[HANGUP]'.
+1. Spoken Audio Only: Output PURE SPOKEN ENGLISH. NEVER output markdown symbols (no asterisks **, no bold, no bullet points, no headers, no emojis, no URLs).
+2. Strictly 1 to 3 Sentences: Keep all spoken responses strictly between 1 and 3 concise sentences so Suhail can digest it easily over the phone.
+3. Natural Punctuation & Contractions: Use spoken punctuation (commas for breathing pauses) and natural contractions (such as "I've", "it's", "you're", "we've", "don't").
+4. Live Gmail RAG: When Suhail asks if he received any emails (e.g. from Samer, unread emails, interview updates), call search_emails or get_recent_unread_emails, extract key info (who, when, subject, summary), and report it clearly.
+5. Next Steps: Always conclude by asking the natural next action (e.g. 'Would you like me to read the full message, or draft a reply with your resume attached?').
+6. Sending Emails: If Suhail asks to reply or send an email, call create_draft_email or prepare the message, describe it briefly, and ask: 'Shall I send that now, boss?'.
+7. Confirming Send: If Suhail confirms ('yes', 'send it', 'do it'), call send_email or send_draft immediately, and confirm: 'Sent boss! Anything else I can help with?'.
+8. Farewell: If Suhail says 'that is all', 'thanks', 'goodbye', or 'bye', reply with a warm closing like 'Always at your service boss, have a great day!' and append '[HANGUP]'.
 """
 
 
@@ -1381,7 +1504,7 @@ def handle_inbound_voice_session(rtp_sock, destinations, call_id, from_tag, to_t
         3. If quiet on Turn 1, prompts once. If farewell ('that's all', 'bye'), concludes warmly and hangs up.
         4. Plays fast 0ms acknowledgment filler ('Checking that for you now, boss.') so there is no dead silence.
         5. Executes live Gmail tools via execute_voice_rag_turn (search_emails, read_email, get_recent_unread_emails, clean_promotions, create_draft_email, send_email, etc.).
-        6. Converts answer to natural spoken audio (en-GB-ThomasNeural +0% rate).
+        6. Converts answer to natural spoken audio (en-GB-RyanNeural -1Hz -2% rate).
         7. Plays spoken response over RTP with continuous wall-clock timestamps (solid green bars!).
         8. If the turn had [HANGUP], ends the call; otherwise listens for boss's next question or command!
     """
@@ -1398,6 +1521,8 @@ def handle_inbound_voice_session(rtp_sock, destinations, call_id, from_tag, to_t
             return
         try:
             data, s_addr = rtp_sock.recvfrom(2048)
+            if handle_stun_packet(data, s_addr, rtp_sock):
+                continue
             if len(data) >= 12 and s_addr:
                 print(f"🎯 Symmetric RTP pre-locked onto active inbound endpoint: {s_addr}")
                 destinations = [s_addr]
@@ -1417,6 +1542,9 @@ def handle_inbound_voice_session(rtp_sock, destinations, call_id, from_tag, to_t
 
     # 1. Greet Boss
     print("🗣️ Inbound TARS: Greeting boss with live conversational RAG agent...")
+    # Send 300ms comfort silence (15 frames) to warm up phone DAC and lock jitter buffer to green
+    silence_20ms = b"\xff" * 160
+    player.play(silence_20ms * 15)
     player.play(inbound_greeting)
     player.play(beep_ulaw)
 
@@ -1438,13 +1566,13 @@ def handle_inbound_voice_session(rtp_sock, destinations, call_id, from_tag, to_t
         print(f"🗣️ BOSS: '{transcript}'")
 
         if not transcript:
-            if turn == 1:
+            if turn <= 2:
                 retry_prompt = asyncio.run(generate_speech_ulaw("I'm listening boss, what would you like me to check?", rate=VOICE_RATE, pitch=VOICE_PITCH))
                 player.play(retry_prompt)
                 player.play(beep_ulaw)
                 continue
             else:
-                # Quiet on follow-up turn -> call finished
+                # Quiet on 3rd turn -> call finished
                 break
 
         all_transcripts.append(transcript)
@@ -1487,6 +1615,7 @@ def handle_inbound_voice_session(rtp_sock, destinations, call_id, from_tag, to_t
         )
 
     # Conclude call
+    player.stop_silence_stream()
     time.sleep(0.5)
     _send_inbound_bye(sip_sock, contact_uri, local_ip, local_port, to_tag, from_tag, call_id, caller_ip, caller_port, routes)
     rtp_sock.close()

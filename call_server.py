@@ -6,6 +6,7 @@ import asyncio
 import tempfile
 import socket
 import logging
+import re
 from typing import List, Dict, Any, Optional
 
 import uvicorn
@@ -41,9 +42,9 @@ if os.path.exists(env_path):
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
-VOICE_NAME = os.environ.get("TARS_VOICE", "en-GB-ThomasNeural")  # Marvel's JARVIS (Paul Bettany British accent)
-VOICE_PITCH = "+0Hz"
-VOICE_RATE = "+0%"
+VOICE_NAME = os.environ.get("TARS_VOICE", "en-GB-RyanNeural")
+VOICE_PITCH = "-1Hz"
+VOICE_RATE = "-2%"
 
 app = FastAPI(title="TARS Voice Sentinel API", version="1.0.0")
 
@@ -93,9 +94,28 @@ active_call_context: Dict[str, Any] = {}
 processed_email_ids = set()
 
 
+def clean_spoken_text(text: str) -> str:
+    """Sanitizes text for speech synthesis: strips markdown, bullets, URLs, and enforces strictly 1-3 spoken sentences with natural punctuation."""
+    if not text:
+        return ""
+    text = re.sub(r'\[([^\]]+)\]\([^\)]*\)', r'\1', text)
+    text = re.sub(r'https?://\S+|www\.\S+', '', text)
+    text = re.sub(r'[*_#`~>|•]', ' ', text)
+    text = re.sub(r'(?:^|(?<=[.!?:\s]))[-+*]\s+', '', text)
+    text = re.sub(r'(?:^|(?<=[.!?:\s]))\d+[\.\)]\s+', '', text)
+    text = re.sub(r'—|–|--', ', ', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    text = re.sub(r'\s+([,.!?])', r'\1', text)
+    sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if s.strip()]
+    if len(sentences) > 3:
+        text = " ".join(sentences[:3])
+    return text
+
+
 async def synthesize_speech_base64(text: str) -> str:
     """Generate MP3 audio via Edge-TTS and return as Base64 string."""
     try:
+        text = clean_spoken_text(text)
         communicate = edge_tts.Communicate(text, VOICE_NAME, pitch=VOICE_PITCH, rate=VOICE_RATE)
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
             tmp_path = tmp.name

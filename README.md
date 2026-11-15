@@ -1,105 +1,181 @@
-# 🤖 Personal Email AI Agent
+# 🤖 TARS: Tactical Autonomous Reconnaissance Sentinel
+### *Autonomous Executive Email & Real-Time Voice Telephony Agent*
 
-A lightweight, secure, and fully automated AI assistant running **24/7 in the cloud** to scan your Gmail inbox, check Google Calendar availability, auto-delete SPAM, draft replies to URGENT queries, and send paged digests to your phone via Telegram.
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.11%20%7C%203.12%2B-blue?logo=python&logoColor=white" alt="Python" />
+  <img src="https://img.shields.io/badge/FastAPI-Production%20Async-009688?logo=fastapi&logoColor=white" alt="FastAPI" />
+  <img src="https://img.shields.io/badge/LLM-Groq%20Llama%203.3%20%26%20Whisper-orange?logo=fastapi&logoColor=white" alt="Groq" />
+  <img src="https://img.shields.io/badge/Voice%20Synthesis-Edge--TTS%20(RyanNeural)-blueviolet" alt="Edge-TTS" />
+  <img src="https://img.shields.io/badge/VoIP-Linphone%20SIP%20%2F%20SDES--SRTP-green?logo=sip&logoColor=white" alt="SIP" />
+  <img src="https://img.shields.io/badge/Mission%20Control-Telegram%20Bot%20API-2CA5E0?logo=telegram&logoColor=white" alt="Telegram" />
+  <img src="https://img.shields.io/badge/Cost-100%25%20Free%20Forever%20($0.00)-brightgreen" alt="Zero Cost" />
+</p>
 
 ---
 
-## 📁 System Architecture & Flow
+## 🌌 Overview
+
+**TARS** is an autonomous executive AI assistant and voice sentinel engineered for **Mohammed Suhail**. Inspired by the personality parameters of TARS (*Interstellar* — Honesty: 90%, Humor: 75%, Loyalty: 100%), it monitors your Gmail inbox 24/7, auto-purges spam, identifies critical opportunities (interviews, recruiter queries, urgent deadlines), and **physically calls your phone over SIP/VoIP** with a young, crisp British AI voice (Marvel's J.A.R.V.I.S. persona).
+
+During a phone call, TARS runs a real-time **Conversational Voice RAG Engine** with live Gmail tool execution: you can ask questions, have TARS search your emails, listen to summaries, approve custom drafted replies, and auto-dispatch your resume—hands-free from your phone dial pad or through spoken dialogue.
+
+---
+
+## ⚡ Key Highlights & Capabilities
+
+### 1. 📞 Full-Duplex VoIP SIP Telephony ($0.00 Forever)
+* **Zero Twilio & Zero Paid Telephony:** Communicates directly with Linphone SIP proxies via RFC 2617 MD5 Digest Authentication.
+* **Low-Latency Audio Pipeline:** 8 kHz G.711 $\mu$-law streaming with symmetric RTP and dual-mode SDES-SRTP (`AES_CM_128_HMAC_SHA1_80`) encryption via `pylibsrtp`.
+* **Jitter Buffer Comfort Silence Streamer:** Continuously transmits digital silence packets during listening turns, maintaining rock-solid network state without signal drops.
+* **RFC 2833 DTMF Support:** Tap `1` on your telephone dial pad during a call to confirm email dispatches immediately.
+
+### 2. 🎙️ J.A.R.V.I.S. Voice Persona & Real-Time RAG
+* **Crisp British AI Persona:** Uses `en-GB-RyanNeural` (pitch: `-1Hz`, rate: `-2%`) to deliver an unflappable, mid-baritone cadence.
+* **Sub-200ms Transcription:** Powered by Groq Whisper for real-time speech-to-text.
+* **Zero Dead Silence Fillers:** Pre-cached acoustic fillers (`"Checking that for you now, boss."`) play in under $1\text{ ms}$ while Gmail queries execute.
+* **Spoken-Audio Formatting:** Strips markdown, URLs, and asterisks; uses natural contractions (*"I've"*, *"it's"*, *"you're"*) and natural breathing pauses.
+
+### 3. 🧠 Autonomous Gmail Tool Calling
+* **Live Tool Invocation:** Equipped with function tools for `search_emails`, `read_email`, `get_recent_unread_emails`, `create_draft_email`, `send_email`, `clean_promotions`, and `trash_emails`.
+* **Automatic Resume Dispatcher:** Detects recruiter requests and interview inquiries, automatically attaching [`Mohammed_Suhail_Resume.pdf`](Mohammed_Suhail_Resume.pdf) to verified drafts.
+* **Anti-Template Philosophy:** Crafts 100% contextual replies tailored to what each sender requested. Never sends robotic boilerplate.
+
+### 4. 📱 Telegram Mission Control
+* **Inline Action Buttons:** Instant mobile controls for `✅ Send Reply & Attach Resume`, `❌ Ignore`, and `🗑️ Move to Trash`.
+* **Live In-Chat Draft Previews:** Complete draft formatting rendered directly inside Telegram before sending.
+* **Commands:** `/status`, `/scan`, `/clean`, `/summary`.
+
+---
+
+## 🏗️ System Architecture
 
 ```mermaid
-graph TD
-    A[Gmail Inbox] -->|New Email| B(GitHub Actions Cron - Every 15 mins)
-    B -->|Check Unread| C[check_emails.py]
-    C -->|Fetch Calendar Context| D[Google Calendar API]
-    C -->|Analyze Email & Draft| E[Groq Llama 3.1 8B]
-    
-    E -->|SPAM| F[Move to Gmail Trash]
-    E -->|INFO| G[Apply label AI-Info]
-    E -->|URGENT| H[Send Telegram Alert]
-    
-    H -->|Click Send Reply / Ignore| I[Telegram Chat Bot]
-    I -->|Trigger Webhook| J[Vercel Serverless Function]
-    J -->|Approved Reply| K[Send Email via Gmail API]
+flowchart TD
+    subgraph Ingestion["📬 Ingestion & Polling"]
+        A[Gmail Inbox] -->|15s Sentinel / Webhook| B[Background Watcher]
+    end
+
+    subgraph Intelligence["🧠 Intelligence Core"]
+        B -->|Unread Messages| C[Groq Llama 3.3]
+        C -->|Category Classification| D{Action Matrix}
+        D -->|SPAM| E[Move to Trash]
+        D -->|INFO| F[Daily Paged Digest]
+        D -->|URGENT / INTERVIEW| G[Urgent Alert Dispatcher]
+    end
+
+    subgraph MultiChannel["📡 Real-Time Dispatch"]
+        G -->|Send Action Card| H[Telegram Bot API]
+        G -->|Initiate SIP VoIP Call| I[TARS Voice Sentinel]
+    end
+
+    subgraph VoiceEngine["🎙️ Full-Duplex Voice Telephony"]
+        I -->|RFC 2617 SIP / SDES-SRTP| J[Linphone SIP / Mobile Phone]
+        J -->|Microphone Stream| K[Groq Whisper STT]
+        K -->|Transcribed Query| L[Voice RAG Tool Engine]
+        L -->|Live Gmail Tools| A
+        L -->|Synthesis| M[Edge-TTS RyanNeural]
+        M -->|8kHz u-law RTP| J
+    end
 ```
 
 ---
 
-## ✨ Features
+## 📁 Repository Structure
 
-* **🧠 Smart Llama 3.1 8B (via Groq API):** Powered by Meta's highly capable model on Groq's high-speed free tier, giving you **14,400 free requests per day** (no cost, no quota blocks).
-* **🗑️ Automated SPAM Cleaner:** Any email classified as `SPAM` is instantly moved to your Gmail **Trash** folder, removing it from your inbox immediately with a 30-day safety net.
-* **⚡ Interactive Telegram Controls:** Tap **`Send Reply`** or **`Ignore`** directly from alerts on your phone to instantly send the drafted response via your Gmail account.
-* **📅 Paged Daily Digests:** Summarizes informational updates into a clean single-sentence digest. Paged to 5 items to avoid serverless execution timeouts.
-* **⏰ 24/7 GitHub Actions Cron:** Automatically polls your Gmail inbox every 15 minutes and compiles digests every night at 8:00 PM IST.
-
----
-
-## 📱 Bot Commands on Telegram
-
-Message your bot directly on Telegram to trigger these commands:
-
-* 🔌 `/status` - Pings Vercel, Gmail, Google Calendar, and Groq APIs to verify connections.
-* 🔍 `/scan` - Instantly triggers a manual scan of the most recent 2 unread emails.
-* 🧹 `/clean` - Instantly trashes up to 300 promotional emails from your inbox.
-* 📅 `/summary` - Compiles your daily digest of informational emails immediately.
+```
+├── call_server.py                 # FastAPI & SIP Sentinel daemon server (Ports 8080 & 5060)
+├── sip_caller.py                  # Core VoIP telephony engine (RFC 2617, SDES-SRTP, RTP streaming)
+├── tars_agent.py                  # TARS autonomous multi-turn reasoning agent & Gmail tools
+├── check_emails.py                # 24/7 Gmail watcher, Groq classification & Telegram dispatcher
+├── Mohammed_Suhail_Resume.pdf     # Official CV auto-attached to recruiter replies
+├── static/
+│   ├── index.html                 # Mobile WebRTC/WebSocket browser calling interface
+│   └── ...
+├── _audio_cache/                  # Pre-compiled u-law acoustic filler assets (0ms latency)
+└── requirements.txt               # Production Python dependencies
+```
 
 ---
 
-## 🚀 Setup & Deployment Guide
+## 🚀 Quickstart Guide
 
-### 1. Secret Keys Checklist
-You will need to gather the following 6 keys:
-1. `GOOGLE_CLIENT_ID` & `GOOGLE_CLIENT_SECRET` (OAuth 2.0 Credentials from Google Cloud Console).
-2. `GOOGLE_REFRESH_TOKEN` (Generated from your OAuth login flow).
-3. `TELEGRAM_BOT_TOKEN` (From Telegram's `@BotFather`).
-4. `TELEGRAM_CHAT_ID` (Your Telegram User ID from `@GetIDBot`).
-5. `GROQ_API_KEY` (Free key from [Groq Console](https://console.groq.com/)).
-6. `STUDENT_PROFILE` (Text describing your background, college, internship goals, and desired reply tone).
+### 1. Prerequisites
+* Python 3.11 or 3.12+
+* Linphone account ([Linphone.org Free SIP](https://www.linphone.org/))
+* Google Cloud OAuth 2.0 Credentials (with Gmail API enabled)
+* Free [Groq Cloud API Key](https://console.groq.com/)
+* Telegram Bot Token ([@BotFather](https://t.me/BotFather))
+
+### 2. Environment Configuration
+Create a `.env` file in the project root:
+
+```env
+# Google OAuth 2.0
+GOOGLE_CLIENT_ID="your_google_client_id"
+GOOGLE_CLIENT_SECRET="your_google_client_secret"
+GOOGLE_REFRESH_TOKEN="your_google_refresh_token"
+USER_EMAIL="mdsuhailtab.1@gmail.com"
+
+# Groq Intelligence (LLM & Whisper STT)
+GROQ_API_KEY="gsk_your_groq_api_key"
+
+# Telegram Bot
+TELEGRAM_BOT_TOKEN="your_telegram_bot_token"
+TELEGRAM_CHAT_ID="your_telegram_chat_id"
+
+# Linphone SIP Credentials
+TARS_SIP_USERNAME="suhail_tars"
+TARS_SIP_PASSWORD="your_sip_password"
+TARS_SIP_DOMAIN="sip.linphone.org"
+USER_SIP_URI="sip:mohammed_suhail@sip.linphone.org"
+
+# Voice Persona Tuning (Marvel's J.A.R.V.I.S.)
+TARS_VOICE="en-GB-RyanNeural"
+```
+
+### 3. Install Dependencies
+```powershell
+pip install -r requirements.txt
+```
+
+### 4. Launch TARS Sentinel Daemon
+```powershell
+python call_server.py
+```
+
+Output confirms inbound registration:
+```
+🎧 TARS Inbound SIP Server bound on 192.168.1.4:5060
+📡 Sent authenticated REGISTER for suhail_tars@sip.linphone.org
+✅ TARS is officially registered as sip:suhail_tars@sip.linphone.org!
+✅ Linphone Registration Confirmed: 200 OK
+```
 
 ---
 
-### 2. Local Setup
-1. Clone the repository.
-2. Create a `.env` file in the root folder:
-   ```env
-   GOOGLE_CLIENT_ID=your_id
-   GOOGLE_CLIENT_SECRET=your_secret
-   GOOGLE_REFRESH_TOKEN=your_token
-   TELEGRAM_BOT_TOKEN=your_bot_token
-   TELEGRAM_CHAT_ID=your_chat_id
-   GROQ_API_KEY=your_groq_key
-   STUDENT_PROFILE=your_profile_details
-   ```
-3. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-4. Run a manual scan:
-   ```bash
-   python check_emails.py
-   ```
+## 📞 Calling TARS
+
+1. **Inbound Inquiries**: Open the **Linphone** app on your phone and dial `suhail_tars`.
+2. **Interactive Dialogue**:
+   * *“Hello boss, TARS online. How can I help you today?”*
+   * *“Did I get any email from Samer?”*
+   * TARS plays instantaneous filler audio (*“Checking that for you now, boss.”*), executes `search_emails`, summarizes Samer’s message, and asks if you would like to draft a reply with your resume attached.
+   * Speak *"Yes, send it"* or press **`1`** on your keypad to dispatch immediately.
 
 ---
 
-### 3. Deploy Serverless Webhook (Vercel)
-1. Link your folder to Vercel:
-   ```bash
-   vercel
-   ```
-2. Go to Vercel settings and add the 6 secrets above as Environment Variables.
-3. Deploy to production:
-   ```bash
-   vercel --prod
-   ```
-4. Set your Telegram Bot webhook URL by executing this in your browser/terminal:
-   ```bash
-   https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook?url=<YOUR_VERCEL_PRODUCTION_URL>/api/telegram_webhook
-   ```
+## 🔒 Security & Privacy
+
+* **Direct Local Control**: Sensitive SIP audio packets stream directly between your local machine and your phone.
+* **Encrypted RTP**: Audio is encrypted via SRTP with SDES key negotiation.
+* **Zero Cloud Lock-In**: Operates with $0.00 in cloud telephony bills using free open standards.
 
 ---
 
-### 4. 24/7 Automatic Scheduler (GitHub Actions)
-1. Push this code to a **private** GitHub repository.
-2. Go to your repository settings page: **Settings** -> **Secrets and variables** -> **Actions**.
-3. Add the 6 secret variables listed above as **Repository Secrets**.
-4. The workflow in `.github/workflows/scan.yml` will now automatically scan your inbox every 15 minutes!
+## 👨‍💻 Author & Credits
+
+**Mohammed Suhail**  
+*B.E. Information Technology (Class of 2028), ISL Engineering College, Hyderabad*  
+* Founder, **Claude Code & Cowork (C3) Club** ([c3club.vercel.app](https://c3club.vercel.app))  
+* GitHub: [@mohammedsuhail0](https://github.com/mohammedsuhail0)  
+* LinkedIn: [mohammed-suhail](https://linkedin.com/in/mohammed-suhail-b39883274)
