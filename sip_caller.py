@@ -1666,45 +1666,85 @@ def run_inbound_sip_server(port=5060):
         print(f"⚠️ Could not bind inbound SIP listener on port {port}: {e}")
         return
 
-    def _do_register():
+    reg_state = {
+        "call_id": uuid.uuid4().hex + "@" + public_ip,
+        "from_tag": uuid.uuid4().hex[:8],
+        "cseq": 0,
+        "registered": False,
+        "last_reg_sent": 0,
+        "last_success": 0
+    }
+
+    def _send_initial_register():
+        reg_state["cseq"] += 1
+        branch = "z9hG4bK" + uuid.uuid4().hex[:20]
+        reg_packet = (
+            f"REGISTER sip:{server} SIP/2.0\r\n"
+            f"Via: SIP/2.0/UDP {public_ip}:{port};branch={branch};rport\r\n"
+            f"From: <sip:{username}@{server}>;tag={reg_state['from_tag']}\r\n"
+            f"To: <sip:{username}@{server}>\r\n"
+            f"Call-ID: {reg_state['call_id']}\r\n"
+            f"CSeq: {reg_state['cseq']} REGISTER\r\n"
+            f"Contact: <sip:{username}@{public_ip}:{port};transport=UDP>;expires=600\r\n"
+            "Max-Forwards: 70\r\n"
+            f"User-Agent: {CALLER_DISPLAY}\r\n"
+            "Content-Length: 0\r\n\r\n"
+        )
         try:
-            call_id = uuid.uuid4().hex + "@" + public_ip
-            from_tag = uuid.uuid4().hex[:8]
-            branch1 = "z9hG4bK" + uuid.uuid4().hex[:20]
-            reg1 = (
-                f"REGISTER sip:{server} SIP/2.0\r\n"
-                f"Via: SIP/2.0/UDP {public_ip}:{port};branch={branch1};rport\r\n"
-                f"From: <sip:{username}@{server}>;tag={from_tag}\r\n"
-                f"To: <sip:{username}@{server}>\r\n"
-                f"Call-ID: {call_id}\r\n"
-                f"CSeq: 1 REGISTER\r\n"
-                f"Contact: <sip:{username}@{public_ip}:{port};transport=UDP>;expires=600\r\n"
-                "Max-Forwards: 70\r\n"
-                f"User-Agent: {CALLER_DISPLAY}\r\n"
-                "Content-Length: 0\r\n\r\n"
-            )
-            sock.sendto(reg1.encode(), (server, server_port))
+            sock.sendto(reg_packet.encode(), (server, server_port))
+            reg_state["last_reg_sent"] = time.time()
+            print(f"📡 Sent initial REGISTER request (CSeq: {reg_state['cseq']}) for {username}@{server}...")
+        except Exception as se:
+            print(f"⚠️ Failed to send REGISTER: {se}")
 
-            resp1 = None
-            start = time.time()
-            sock.settimeout(2.0)
-            while time.time() - start < 4.0:
-                try:
-                    data, _ = sock.recvfrom(4096)
-                    txt = data.decode("utf-8", errors="ignore")
-                    if "401" in txt or "407" in txt:
-                        resp1 = txt
-                        break
-                except socket.timeout:
-                    continue
-                except Exception:
-                    break
+    # Registration & NAT Keep-Alive Thread (RFC 5626)
+    def _reg_keeper():
+        time.sleep(2)
+        while True:
+            try:
+                # 1. Send double-CRLF NAT keepalive ping every 25 seconds
+                sock.sendto(b"\r\n\r\n", (server, server_port))
 
-            if resp1:
-                auth_header_name = "Proxy-Authenticate" if "407" in resp1 else "WWW-Authenticate"
-                auth_req_name = "Proxy-Authorization" if "407" in resp1 else "Authorization"
-                challenge = parse_auth_challenge(resp1, auth_header_name)
+                # 2. Check if we need to refresh registration (every 180s) or retry failed registration (>30s)
+                now = time.time()
+                needs_refresh = (now - reg_state.get("last_reg_sent", 0) >= 180) or (
+                    not reg_state.get("registered", False) and (now - reg_state.get("last_reg_sent", 0) >= 30)
+                )
+                if needs_refresh:
+                    print("🔄 Refreshing SIP registration with Linphone Flexisip...")
+                    _send_initial_register()
+            except Exception as re_err:
+                print(f"⚠️ Registration keepalive error: {re_err}")
+            time.sleep(25)
+
+    # Send initial registration before loop
+    _send_initial_register()
+
+    reg_thread = threading.Thread(target=_reg_keeper, daemon=True, name="SIP-Reg-Keeper")
+    reg_thread.start()
+
+    print(f"📡 Registering as sip:{username}@{server} on port {port} (NAT keepalive active)...")
+    print(f"👉 Once registered, you can dial '{username}' from Linphone on your phone anytime!\n")
+
+    sock.settimeout(None)
+    while True:
+        try:
+            data, addr = sock.recvfrom(4096)
+            if not data or not data.strip():
+                continue
+            msg = data.decode("utf-8", errors="ignore")
+            if not msg.strip():
+                continue
+            first_line = msg.splitlines()[0] if msg.splitlines() else ""
+
+            # --- SIP Authentication Challenge Handler (401 / 407) ---
+            if any(code in first_line for code in ("401", "407")) and ("REGISTER" in msg or "WWW-Authenticate" in msg or "Proxy-Authenticate" in msg):
+                auth_header_name = "Proxy-Authenticate" if "407" in msg else "WWW-Authenticate"
+                auth_req_name = "Proxy-Authorization" if "407" in msg else "Authorization"
+                challenge = parse_auth_challenge(msg, auth_header_name)
                 if challenge and challenge.get("nonce"):
+                    reg_state["cseq"] += 1
+                    branch2 = "z9hG4bK" + uuid.uuid4().hex[:20]
                     auth_val = compute_digest(
                         username=username,
                         password=password,
@@ -1712,17 +1752,16 @@ def run_inbound_sip_server(port=5060):
                         nonce=challenge["nonce"],
                         method="REGISTER",
                         uri=f"sip:{server}",
-                        qop=challenge["qop"],
-                        opaque=challenge["opaque"]
+                        qop=challenge.get("qop"),
+                        opaque=challenge.get("opaque")
                     )
-                    branch2 = "z9hG4bK" + uuid.uuid4().hex[:20]
                     reg2 = (
                         f"REGISTER sip:{server} SIP/2.0\r\n"
                         f"Via: SIP/2.0/UDP {public_ip}:{port};branch={branch2};rport\r\n"
-                        f"From: <sip:{username}@{server}>;tag={from_tag}\r\n"
+                        f"From: <sip:{username}@{server}>;tag={reg_state['from_tag']}\r\n"
                         f"To: <sip:{username}@{server}>\r\n"
-                        f"Call-ID: {call_id}\r\n"
-                        f"CSeq: 2 REGISTER\r\n"
+                        f"Call-ID: {reg_state['call_id']}\r\n"
+                        f"CSeq: {reg_state['cseq']} REGISTER\r\n"
                         f"Contact: <sip:{username}@{public_ip}:{port};transport=UDP>;expires=600\r\n"
                         f"{auth_req_name}: {auth_val}\r\n"
                         "Max-Forwards: 70\r\n"
@@ -1730,34 +1769,16 @@ def run_inbound_sip_server(port=5060):
                         "Content-Length: 0\r\n\r\n"
                     )
                     sock.sendto(reg2.encode(), (server, server_port))
-                    print(f"📡 Sent authenticated REGISTER for {username}@{server} on port {port}")
-        except Exception as reg_e:
-            print(f"⚠️ Registration error: {reg_e}")
+                    print(f"📡 Responded to 401 challenge with authenticated REGISTER (CSeq: {reg_state['cseq']})")
+                continue
 
-    # Initial register
-    _do_register()
-
-    # Registration refresh thread (every 280s)
-    def _reg_keeper():
-        while True:
-            time.sleep(280)
-            try:
-                print("🔄 Refreshing SIP registration with Linphone Flexisip...")
-                _do_register()
-            except Exception as re_err:
-                print(f"⚠️ Registration refresh error: {re_err}")
-
-    reg_thread = threading.Thread(target=_reg_keeper, daemon=True, name="SIP-Reg-Keeper")
-    reg_thread.start()
-
-    print(f"✅ TARS is officially registered as sip:{username}@{server} on port {port}!")
-    print(f"👉 You can now call '{username}' directly from your Linphone app anytime!\n")
-
-    sock.settimeout(None)
-    while True:
-        try:
-            data, addr = sock.recvfrom(4096)
-            msg = data.decode("utf-8", errors="ignore")
+            # --- SIP Registration Successful (200 OK) ---
+            elif ("200 Registration successful" in msg) or ("200 OK" in first_line and "REGISTER" in msg):
+                reg_state["registered"] = True
+                reg_state["last_success"] = time.time()
+                print(f"✅ Linphone Registration Confirmed: 200 OK for {username}@{server}!")
+                print(f"👉 Ready for inbound calls! Dial '{username}' from Linphone app.\n")
+                continue
             first_line = msg.splitlines()[0] if msg.splitlines() else ""
 
             if first_line.startswith("INVITE"):
@@ -1862,10 +1883,6 @@ def run_inbound_sip_server(port=5060):
                     + "Content-Length: 0\r\n\r\n"
                 )
                 sock.sendto(resp_options.encode(), addr)
-
-            elif "200 Registration successful" in msg or "200 OK" in first_line:
-                if "REGISTER" in msg:
-                    print("✅ Linphone Registration Confirmed: 200 OK")
 
             elif first_line.startswith("BYE") or first_line.startswith("CANCEL"):
                 bye_call_id_m = re.search(r'Call-ID:\s*([^\r\n]+)', msg, re.IGNORECASE)
