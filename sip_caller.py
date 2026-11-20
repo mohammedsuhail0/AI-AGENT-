@@ -130,25 +130,27 @@ CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_audio_cac
 os.makedirs(CACHE_DIR, exist_ok=True)
 _SIP_CALL_LOCK = threading.Lock()
 _CACHED_PUBLIC_IP = None
+_LAST_PUBLIC_IP_CHECK = 0
 _active_inbound_call_id = None
 _active_inbound_lock = threading.Lock()
 
 
-def get_public_ip() -> str:
-    """Finds the external public WAN IP address."""
-    global _CACHED_PUBLIC_IP
-    if _CACHED_PUBLIC_IP:
+def get_public_ip(force_refresh=False) -> str:
+    """Finds the external public WAN IP address with auto-refresh on network changes."""
+    global _CACHED_PUBLIC_IP, _LAST_PUBLIC_IP_CHECK
+    now = time.time()
+    if not force_refresh and _CACHED_PUBLIC_IP and (now - _LAST_PUBLIC_IP_CHECK < 120):
         return _CACHED_PUBLIC_IP
     for url in ["https://api.ipify.org", "https://ifconfig.me/ip", "https://icanhazip.com"]:
         try:
             r = requests.get(url, timeout=3)
             if r.status_code == 200 and r.text.strip():
                 _CACHED_PUBLIC_IP = r.text.strip()
+                _LAST_PUBLIC_IP_CHECK = now
                 return _CACHED_PUBLIC_IP
         except Exception:
             continue
-    _CACHED_PUBLIC_IP = "117.99.202.109"
-    return _CACHED_PUBLIC_IP
+    return _CACHED_PUBLIC_IP or "106.195.65.85"
 
 
 def get_local_ip() -> str:
@@ -160,7 +162,7 @@ def get_local_ip() -> str:
         s.close()
         return ip
     except Exception:
-        return "192.168.1.2"
+        return "127.0.0.1"
 
 
 
@@ -1655,37 +1657,50 @@ def run_inbound_sip_server(port=5060):
     server_port = 5060
     username = LINPHONE_USERNAME
     password = LINPHONE_PASSWORD
-    public_ip = get_public_ip()
-    local_ip = get_local_ip()
+    initial_pub_ip = get_public_ip(force_refresh=True)
+    initial_loc_ip = get_local_ip()
 
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.bind(("0.0.0.0", port))
-        print(f"🎧 TARS Inbound SIP Server bound on {local_ip}:{port} (Public IP: {public_ip})")
+        print(f"🎧 TARS Inbound SIP Server bound on {initial_loc_ip}:{port} (Public IP: {initial_pub_ip})")
     except Exception as e:
         print(f"⚠️ Could not bind inbound SIP listener on port {port}: {e}")
         return
 
     reg_state = {
-        "call_id": uuid.uuid4().hex + "@" + public_ip,
+        "call_id": uuid.uuid4().hex + "@" + initial_pub_ip,
         "from_tag": uuid.uuid4().hex[:8],
         "cseq": 0,
         "registered": False,
         "last_reg_sent": 0,
-        "last_success": 0
+        "last_success": 0,
+        "public_ip": initial_pub_ip,
+        "local_ip": initial_loc_ip
     }
 
     def _send_initial_register():
+        curr_pub_ip = get_public_ip(force_refresh=True)
+        curr_loc_ip = get_local_ip()
+        if curr_pub_ip != reg_state.get("public_ip"):
+            print(f"🌐 Dynamic Public IP change detected: {reg_state.get('public_ip')} -> {curr_pub_ip}")
+            reg_state["public_ip"] = curr_pub_ip
+            reg_state["call_id"] = uuid.uuid4().hex + "@" + curr_pub_ip
+            reg_state["cseq"] = 0
+            reg_state["registered"] = False
+        reg_state["local_ip"] = curr_loc_ip
+
         reg_state["cseq"] += 1
         branch = "z9hG4bK" + uuid.uuid4().hex[:20]
+        cur_ip = reg_state["public_ip"]
         reg_packet = (
             f"REGISTER sip:{server} SIP/2.0\r\n"
-            f"Via: SIP/2.0/UDP {public_ip}:{port};branch={branch};rport\r\n"
+            f"Via: SIP/2.0/UDP {cur_ip}:{port};branch={branch};rport\r\n"
             f"From: <sip:{username}@{server}>;tag={reg_state['from_tag']}\r\n"
             f"To: <sip:{username}@{server}>\r\n"
             f"Call-ID: {reg_state['call_id']}\r\n"
             f"CSeq: {reg_state['cseq']} REGISTER\r\n"
-            f"Contact: <sip:{username}@{public_ip}:{port};transport=UDP>;expires=600\r\n"
+            f"Contact: <sip:{username}@{cur_ip}:{port};transport=UDP>;expires=600\r\n"
             "Max-Forwards: 70\r\n"
             f"User-Agent: {CALLER_DISPLAY}\r\n"
             "Content-Length: 0\r\n\r\n"
@@ -1693,7 +1708,7 @@ def run_inbound_sip_server(port=5060):
         try:
             sock.sendto(reg_packet.encode(), (server, server_port))
             reg_state["last_reg_sent"] = time.time()
-            print(f"📡 Sent initial REGISTER request (CSeq: {reg_state['cseq']}) for {username}@{server}...")
+            print(f"📡 Sent initial REGISTER request (CSeq: {reg_state['cseq']}) for {username}@{server} on {cur_ip}...")
         except Exception as se:
             print(f"⚠️ Failed to send REGISTER: {se}")
 
@@ -1745,6 +1760,7 @@ def run_inbound_sip_server(port=5060):
                 if challenge and challenge.get("nonce"):
                     reg_state["cseq"] += 1
                     branch2 = "z9hG4bK" + uuid.uuid4().hex[:20]
+                    cur_ip = reg_state.get("public_ip", initial_pub_ip)
                     auth_val = compute_digest(
                         username=username,
                         password=password,
@@ -1757,12 +1773,12 @@ def run_inbound_sip_server(port=5060):
                     )
                     reg2 = (
                         f"REGISTER sip:{server} SIP/2.0\r\n"
-                        f"Via: SIP/2.0/UDP {public_ip}:{port};branch={branch2};rport\r\n"
+                        f"Via: SIP/2.0/UDP {cur_ip}:{port};branch={branch2};rport\r\n"
                         f"From: <sip:{username}@{server}>;tag={reg_state['from_tag']}\r\n"
                         f"To: <sip:{username}@{server}>\r\n"
                         f"Call-ID: {reg_state['call_id']}\r\n"
                         f"CSeq: {reg_state['cseq']} REGISTER\r\n"
-                        f"Contact: <sip:{username}@{public_ip}:{port};transport=UDP>;expires=600\r\n"
+                        f"Contact: <sip:{username}@{cur_ip}:{port};transport=UDP>;expires=600\r\n"
                         f"{auth_req_name}: {auth_val}\r\n"
                         "Max-Forwards: 70\r\n"
                         f"User-Agent: {CALLER_DISPLAY}\r\n"
@@ -1826,14 +1842,16 @@ def run_inbound_sip_server(port=5060):
                 if not destinations:
                     destinations = [(addr[0], 7078)]
 
+                cur_pub_ip = reg_state.get("public_ip", initial_pub_ip)
+                cur_loc_ip = reg_state.get("local_ip", initial_loc_ip)
                 is_on_lan = any(ip.startswith(("192.168.", "10.", "172.")) for ip, _ in destinations)
-                advertised_ip = local_ip if is_on_lan else public_ip
+                advertised_ip = cur_loc_ip if is_on_lan else cur_pub_ip
 
                 rtp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                 rtp_sock.bind(("0.0.0.0", 0))
                 local_rtp_port = rtp_sock.getsockname()[1]
 
-                sdp_answer, tx_srtp, rx_srtp = build_sdp_answer(sdp_part, local_ip, public_ip, local_rtp_port, is_lan=is_on_lan)
+                sdp_answer, tx_srtp, rx_srtp = build_sdp_answer(sdp_part, cur_loc_ip, cur_pub_ip, local_rtp_port, is_lan=is_on_lan)
                 print(f"📤 200 OK SDP ANSWER:\n{sdp_answer.strip()}\n")
 
                 resp_200 = (
@@ -1844,7 +1862,7 @@ def run_inbound_sip_server(port=5060):
                     f"Call-ID: {call_id}\r\n"
                     f"CSeq: {cseq}\r\n"
                     f"{route_headers_str}"
-                    f"Contact: <sip:{username}@{public_ip}:{port};transport=UDP>\r\n"
+                    f"Contact: <sip:{username}@{cur_pub_ip}:{port};transport=UDP>\r\n"
                     f"User-Agent: {CALLER_DISPLAY}\r\n"
                     "Content-Type: application/sdp\r\n"
                     f"Content-Length: {len(sdp_answer)}\r\n\r\n"
@@ -1908,6 +1926,8 @@ def run_inbound_sip_server(port=5060):
                 sock.sendto(resp_bye.encode(), addr)
 
 
+        except ConnectionResetError:
+            continue
         except Exception as e:
             time.sleep(0.05)
 
