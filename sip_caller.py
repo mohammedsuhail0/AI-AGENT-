@@ -1428,10 +1428,12 @@ def execute_voice_rag_turn(user_query: str, history: list = None) -> tuple[str, 
         history = []
     
     clean_q = user_query.lower().strip()
-    if any(farewell in clean_q for farewell in ["goodbye", "bye", "that's all", "thats all", "nothing else", "no thanks", "all good", "i'm good"]):
+    if any(farewell in clean_q for farewell in ["goodbye", "bye", "that's all", "thats all", "nothing else", "no thanks", "all good", "i'm good", "hang up", "end call"]):
         return "Always at your service boss. Have a wonderful day!", True
 
-    messages = [{"role": "system", "content": VOICE_AGENT_SYSTEM_PROMPT}] + history + [{"role": "user", "content": user_query}]
+    # Sliding window memory: retain last 10 messages so unlimited conversational turns stay instant without token overflow
+    trimmed_history = history[-10:] if len(history) > 10 else history
+    messages = [{"role": "system", "content": VOICE_AGENT_SYSTEM_PROMPT}] + trimmed_history + [{"role": "user", "content": user_query}]
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     voice_models = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
@@ -1552,15 +1554,15 @@ def handle_inbound_voice_session(rtp_sock, destinations, call_id, from_tag, to_t
 
     conversation_history = []
     turn = 0
-    max_turns = 8
     all_transcripts = []
+    consecutive_silence = 0
 
-    while is_current_call() and turn < max_turns:
+    while is_current_call():
         turn += 1
         print(f"\n--- INBOUND VOICE TURN {turn} ---")
 
-        # Record boss's speech (1.8s silence timeout, up to 15s)
-        user_pcm, dtmf_digit = record_user_speech(rtp_sock, max_seconds=15.0, silence_timeout=1.8, player=player, srtp_session=rx_srtp)
+        # Record boss's speech (up to 30s speaking time, 1.8s silence pause detection)
+        user_pcm, dtmf_digit = record_user_speech(rtp_sock, max_seconds=30.0, silence_timeout=1.8, player=player, srtp_session=rx_srtp)
         if not is_current_call():
             break
 
@@ -1568,20 +1570,26 @@ def handle_inbound_voice_session(rtp_sock, destinations, call_id, from_tag, to_t
         print(f"🗣️ BOSS: '{transcript}'")
 
         if not transcript:
-            if turn <= 2:
-                retry_prompt = asyncio.run(generate_speech_ulaw("I'm listening boss, what would you like me to check?", rate=VOICE_RATE, pitch=VOICE_PITCH))
-                player.play(retry_prompt)
-                player.play(beep_ulaw)
+            consecutive_silence += 1
+            if consecutive_silence < 3:
+                prompt_text = "I'm listening boss, what would you like me to check?" if consecutive_silence == 1 else "I'm still here boss, let me know if you need anything."
+                retry_prompt = asyncio.run(generate_speech_ulaw(prompt_text, rate=VOICE_RATE, pitch=VOICE_PITCH))
+                if is_current_call():
+                    player.play(retry_prompt)
+                    player.play(beep_ulaw)
                 continue
             else:
-                # Quiet on 3rd turn -> call finished
+                # Conclude politely after 3 consecutive silent prompts
+                print("⏳ Prolonged silence detected - concluding call.")
                 break
 
+        # Reset silence counter
+        consecutive_silence = 0
         all_transcripts.append(transcript)
 
-        # Check if user says goodbye / farewell
+        # Check if user says goodbye / farewell / hangup
         clean_q = transcript.lower().strip()
-        if any(w in clean_q for w in ["goodbye", "bye", "that's all", "thats all", "nothing else", "no thanks", "all good", "i'm good"]):
+        if any(w in clean_q for w in ["goodbye", "bye", "that's all", "thats all", "nothing else", "no thanks", "all good", "i'm good", "hang up", "end call"]):
             player.play(farewell_ulaw)
             break
 
