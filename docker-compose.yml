@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  tars-voice-sentinel:
+    build: .
+    container_name: tars_voice_sentinel
+    restart: always
+    network_mode: "host"
+    env_file:
+      - .env
+    volumes:
+      - .:/app

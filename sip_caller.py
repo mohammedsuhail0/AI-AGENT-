@@ -816,6 +816,17 @@ def send_telegram_summary(transcript: str, action_taken: str, sender: str, subje
         print(f"⚠️ Telegram notification error: {e}")
 
 
+def send_telegram_status(message: str):
+    """Sends immediate status alerts to Suhail's Telegram so he always knows TARS is active."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}, timeout=5)
+    except Exception as e:
+        print(f"⚠️ Telegram status alert error: {e}")
+
+
 def _trigger_urgent_call_impl(
     subject: str = "Urgent Email",
     sender: str = "",
@@ -1798,10 +1809,18 @@ def run_inbound_sip_server(port=5060):
 
             # --- SIP Registration Successful (200 OK) ---
             elif ("200 Registration successful" in msg) or ("200 OK" in first_line and "REGISTER" in msg):
+                first_success = not reg_state.get("registered", False)
                 reg_state["registered"] = True
                 reg_state["last_success"] = time.time()
                 print(f"✅ Linphone Registration Confirmed: 200 OK for {username}@{server}!")
                 print(f"👉 Ready for inbound calls! Dial '{username}' from Linphone app.\n")
+                if first_success:
+                    send_telegram_status(
+                        f"🟢 *TARS Voice Sentinel is ONLINE*\n"
+                        f"📡 Registered: `{username}@{server}`\n"
+                        f"🌐 Public IP: `{reg_state.get('public_ip')}`\n"
+                        f"📞 Ready for inbound phone calls anytime, boss!"
+                    )
                 continue
             first_line = msg.splitlines()[0] if msg.splitlines() else ""
 
