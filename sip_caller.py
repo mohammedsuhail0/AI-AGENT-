@@ -1695,7 +1695,9 @@ def run_inbound_sip_server(port=5060):
         "last_reg_sent": 0,
         "last_success": 0,
         "public_ip": initial_pub_ip,
-        "local_ip": initial_loc_ip
+        "local_ip": initial_loc_ip,
+        "nat_port": port,
+        "nat_ip": initial_pub_ip
     }
 
     def _send_initial_register():
@@ -1711,15 +1713,22 @@ def run_inbound_sip_server(port=5060):
 
         reg_state["cseq"] += 1
         branch = "z9hG4bK" + uuid.uuid4().hex[:20]
-        cur_ip = reg_state["public_ip"]
+        cur_ip = reg_state.get("nat_ip", reg_state["public_ip"])
+        cur_port = reg_state.get("nat_port", port)
+
+        contact_hdrs = ""
+        if cur_port != 5060:
+            contact_hdrs += f"Contact: <sip:{username}@{cur_ip}:5060>;expires=0\r\n"
+        contact_hdrs += f"Contact: <sip:{username}@{cur_ip}:{cur_port}>;expires=600\r\n"
+
         reg_packet = (
             f"REGISTER sip:{server} SIP/2.0\r\n"
-            f"Via: SIP/2.0/UDP {cur_ip}:{port};branch={branch};rport\r\n"
+            f"Via: SIP/2.0/UDP {cur_ip}:{cur_port};branch={branch};rport\r\n"
             f"From: <sip:{username}@{server}>;tag={reg_state['from_tag']}\r\n"
             f"To: <sip:{username}@{server}>\r\n"
             f"Call-ID: {reg_state['call_id']}\r\n"
             f"CSeq: {reg_state['cseq']} REGISTER\r\n"
-            f"Contact: <sip:{username}@{cur_ip}:{port};transport=UDP>;expires=600\r\n"
+            f"{contact_hdrs}"
             "Max-Forwards: 70\r\n"
             f"User-Agent: {CALLER_DISPLAY}\r\n"
             "Content-Length: 0\r\n\r\n"
@@ -1727,7 +1736,7 @@ def run_inbound_sip_server(port=5060):
         try:
             sock.sendto(reg_packet.encode(), (server, server_port))
             reg_state["last_reg_sent"] = time.time()
-            print(f"📡 Sent initial REGISTER request (CSeq: {reg_state['cseq']}) for {username}@{server} on {cur_ip}...")
+            print(f"📡 Sent initial REGISTER request (CSeq: {reg_state['cseq']}) for {username}@{server} on {cur_ip}:{cur_port}...")
         except Exception as se:
             print(f"⚠️ Failed to send REGISTER: {se}")
 
@@ -1777,9 +1786,17 @@ def run_inbound_sip_server(port=5060):
                 auth_req_name = "Proxy-Authorization" if "407" in msg else "Authorization"
                 challenge = parse_auth_challenge(msg, auth_header_name)
                 if challenge and challenge.get("nonce"):
+                    # Extract server-reflected NAT port and IP from Via header
+                    rport_m = re.search(r';rport=(\d+)', msg, re.IGNORECASE)
+                    received_m = re.search(r';received=([0-9a-fA-F\.:]+)', msg, re.IGNORECASE)
+                    nat_port = int(rport_m.group(1)) if rport_m else port
+                    nat_ip = received_m.group(1) if received_m else reg_state.get("public_ip", initial_pub_ip)
+                    reg_state["nat_port"] = nat_port
+                    reg_state["nat_ip"] = nat_ip
+                    print(f"🌐 Server-reflected NAT mapping detected: {nat_ip}:{nat_port} (Local bound: {port})")
+
                     reg_state["cseq"] += 1
                     branch2 = "z9hG4bK" + uuid.uuid4().hex[:20]
-                    cur_ip = reg_state.get("public_ip", initial_pub_ip)
                     auth_val = compute_digest(
                         username=username,
                         password=password,
@@ -1790,21 +1807,28 @@ def run_inbound_sip_server(port=5060):
                         qop=challenge.get("qop"),
                         opaque=challenge.get("opaque")
                     )
+
+                    # Purge dead port 5060 contact and register live NAT port
+                    contact_lines = ""
+                    if nat_port != 5060:
+                        contact_lines += f"Contact: <sip:{username}@{nat_ip}:5060>;expires=0\r\n"
+                    contact_lines += f"Contact: <sip:{username}@{nat_ip}:{nat_port}>;expires=600\r\n"
+
                     reg2 = (
                         f"REGISTER sip:{server} SIP/2.0\r\n"
-                        f"Via: SIP/2.0/UDP {cur_ip}:{port};branch={branch2};rport\r\n"
+                        f"Via: SIP/2.0/UDP {nat_ip}:{nat_port};branch={branch2};rport\r\n"
                         f"From: <sip:{username}@{server}>;tag={reg_state['from_tag']}\r\n"
                         f"To: <sip:{username}@{server}>\r\n"
                         f"Call-ID: {reg_state['call_id']}\r\n"
                         f"CSeq: {reg_state['cseq']} REGISTER\r\n"
-                        f"Contact: <sip:{username}@{cur_ip}:{port};transport=UDP>;expires=600\r\n"
+                        f"{contact_lines}"
                         f"{auth_req_name}: {auth_val}\r\n"
                         "Max-Forwards: 70\r\n"
                         f"User-Agent: {CALLER_DISPLAY}\r\n"
                         "Content-Length: 0\r\n\r\n"
                     )
                     sock.sendto(reg2.encode(), (server, server_port))
-                    print(f"📡 Responded to 401 challenge with authenticated REGISTER (CSeq: {reg_state['cseq']})")
+                    print(f"📡 Responded to 401 challenge with authenticated REGISTER (CSeq: {reg_state['cseq']}, Port: {nat_port})")
                 continue
 
             # --- SIP Registration Successful (200 OK) ---
@@ -1812,13 +1836,22 @@ def run_inbound_sip_server(port=5060):
                 first_success = not reg_state.get("registered", False)
                 reg_state["registered"] = True
                 reg_state["last_success"] = time.time()
+                rport_m = re.search(r';rport=(\d+)', msg, re.IGNORECASE)
+                received_m = re.search(r';received=([0-9a-fA-F\.:]+)', msg, re.IGNORECASE)
+                if rport_m:
+                    reg_state["nat_port"] = int(rport_m.group(1))
+                if received_m:
+                    reg_state["nat_ip"] = received_m.group(1)
+
+                contacts_found = re.findall(r'Contact:\s*<([^>]+)>', msg, re.IGNORECASE)
                 print(f"✅ Linphone Registration Confirmed: 200 OK for {username}@{server}!")
+                print(f"📋 Registered Contacts with Flexisip: {contacts_found}")
                 print(f"👉 Ready for inbound calls! Dial '{username}' from Linphone app.\n")
                 if first_success:
                     send_telegram_status(
                         f"🟢 *TARS Voice Sentinel is ONLINE*\n"
                         f"📡 Registered: `{username}@{server}`\n"
-                        f"🌐 Public IP: `{reg_state.get('public_ip')}`\n"
+                        f"🌐 NAT Address: `{reg_state.get('nat_ip')}:{reg_state.get('nat_port')}`\n"
                         f"📞 Ready for inbound phone calls anytime, boss!"
                     )
                 continue
@@ -1871,8 +1904,11 @@ def run_inbound_sip_server(port=5060):
 
                 cur_pub_ip = reg_state.get("public_ip", initial_pub_ip)
                 cur_loc_ip = reg_state.get("local_ip", initial_loc_ip)
+                nat_port = reg_state.get("nat_port", port)
+                nat_ip = reg_state.get("nat_ip", cur_pub_ip)
                 is_on_lan = any(ip.startswith(("192.168.", "10.", "172.")) for ip, _ in destinations)
                 advertised_ip = cur_loc_ip if is_on_lan else cur_pub_ip
+                advertised_sip_port = port if is_on_lan else nat_port
 
                 rtp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                 rtp_sock.bind(("0.0.0.0", 0))
@@ -1889,7 +1925,7 @@ def run_inbound_sip_server(port=5060):
                     f"Call-ID: {call_id}\r\n"
                     f"CSeq: {cseq}\r\n"
                     f"{route_headers_str}"
-                    f"Contact: <sip:{username}@{cur_pub_ip}:{port};transport=UDP>\r\n"
+                    f"Contact: <sip:{username}@{advertised_ip}:{advertised_sip_port};transport=UDP>\r\n"
                     f"User-Agent: {CALLER_DISPLAY}\r\n"
                     "Content-Type: application/sdp\r\n"
                     f"Content-Length: {len(sdp_answer)}\r\n\r\n"
@@ -1897,11 +1933,11 @@ def run_inbound_sip_server(port=5060):
                 )
 
                 sock.sendto(resp_200.encode(), addr)
-                print(f"🎉 Answered inbound call with 200 OK! Advertised: {advertised_ip}:{local_rtp_port}")
+                print(f"🎉 Answered inbound call with 200 OK! Advertised: {advertised_ip}:{local_rtp_port} (SIP: {advertised_sip_port})")
 
                 t = threading.Thread(
                     target=handle_inbound_voice_session,
-                    args=(rtp_sock, destinations, call_id, from_tag, to_tag, contact_uri, addr[0], addr[1], sock, advertised_ip, port, record_routes, tx_srtp, rx_srtp),
+                    args=(rtp_sock, destinations, call_id, from_tag, to_tag, contact_uri, addr[0], addr[1], sock, advertised_ip, advertised_sip_port, record_routes, tx_srtp, rx_srtp),
                     daemon=True,
                     name="TARS-Inbound-Call"
                 )
