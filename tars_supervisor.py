@@ -19,13 +19,14 @@ LOG_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_FILE = os.path.join(LOG_DIR, "tars_supervisor.log")
 SERVER_LOG = os.path.join(LOG_DIR, "tars_server.log")
 
+handlers = [logging.FileHandler(LOG_FILE, encoding="utf-8")]
+if sys.stdout is not None:
+    handlers.append(logging.StreamHandler(sys.stdout))
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE, encoding="utf-8"),
-        logging.StreamHandler(sys.stdout)
-    ]
+    handlers=handlers
 )
 logger = logging.getLogger("TARS-Supervisor")
 
@@ -66,7 +67,9 @@ def main():
     logger.info("=======================================================")
 
     os.chdir(LOG_DIR)
-    python_exe = sys.executable
+    python_exe = r"C:\Users\Lenovo\AppData\Local\Programs\Python\Python313\python.exe"
+    if not os.path.exists(python_exe):
+        python_exe = sys.executable
 
     while True:
         # 1. Clean stale ports
