@@ -42,9 +42,9 @@ if os.path.exists(env_path):
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
-VOICE_NAME = os.environ.get("TARS_VOICE", "en-GB-RyanNeural")
-VOICE_PITCH = "-1Hz"
-VOICE_RATE = "-2%"
+VOICE_NAME = os.environ.get("TARS_VOICE", "en-US-GuyNeural")
+VOICE_PITCH = "+0Hz"
+VOICE_RATE = "+0%"
 
 app = FastAPI(title="TARS Voice Sentinel API", version="1.0.0")
 
@@ -116,7 +116,7 @@ async def synthesize_speech_base64(text: str) -> str:
     """Generate MP3 audio via Edge-TTS and return as Base64 string."""
     try:
         text = clean_spoken_text(text)
-        communicate = edge_tts.Communicate(text, VOICE_NAME, pitch=VOICE_PITCH, rate=VOICE_RATE)
+        communicate = edge_tts.Communicate(text, VOICE_NAME, pitch=VOICE_PITCH, rate=VOICE_RATE, volume="+35%")
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
             tmp_path = tmp.name
         

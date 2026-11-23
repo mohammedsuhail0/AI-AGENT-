@@ -123,9 +123,9 @@ groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-VOICE_MODEL = "en-GB-RyanNeural"  # Young, crisp British voice (eliminates old-man sound)
-VOICE_PITCH = "-1Hz"              # Refined mid-baritone resonance
-VOICE_RATE = "-2%"                # Composed, unflappable Jarvis cadence
+VOICE_MODEL = os.environ.get("TARS_VOICE", "en-US-GuyNeural")  # Confident, natural American executive voice
+VOICE_PITCH = "+0Hz"              # Natural resonance
+VOICE_RATE = "+0%"                # Natural conversational cadence
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_audio_cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 _SIP_CALL_LOCK = threading.Lock()
@@ -248,17 +248,29 @@ def clean_spoken_text(text: str) -> str:
 
 
 async def generate_speech_ulaw(text: str, rate: str = VOICE_RATE, pitch: str = VOICE_PITCH) -> bytes:
-    """Synthesizes high-fidelity speech using Edge-TTS configured for Marvel's JARVIS (en-GB-RyanNeural) and converts to 8kHz u-law."""
+    """Synthesizes high-fidelity speech using Edge-TTS configured for American executive voice (en-US-GuyNeural) with soft-saturation volume compression."""
     try:
         text = clean_spoken_text(text)
-        comm = edge_tts.Communicate(text, VOICE_MODEL, rate=rate, pitch=pitch)
+        comm = edge_tts.Communicate(text, VOICE_MODEL, rate=rate, pitch=pitch, volume="+35%")
         chunks = [c["data"] async for c in comm.stream() if c["type"] == "audio"]
         mp3_data = b"".join(chunks)
         decoded = miniaudio.decode(mp3_data, nchannels=1, sample_rate=8000)
         raw_pcm = decoded.samples.tobytes()
-        # Scale to 85% to eliminate digital clipping and harsh DAC distortion on phone speakers
-        scaled_pcm = audioop.mul(raw_pcm, 2, 0.85)
-        return audioop.lin2ulaw(scaled_pcm, 2)
+
+        # Dynamic range compression & 1.85x volume boost with soft-limiting for punchy, loud mobile phone audio
+        num_samples = len(raw_pcm) // 2
+        samples = struct.unpack(f"<{num_samples}h", raw_pcm)
+        boosted = bytearray()
+        for s in samples:
+            v = s * 1.85
+            if v > 31000:
+                v = 31000 + (v - 31000) * 0.15
+            elif v < -31000:
+                v = -31000 + (v - -31000) * 0.15
+            v = max(-32767, min(32767, int(v)))
+            boosted.extend(struct.pack("<h", v))
+
+        return audioop.lin2ulaw(bytes(boosted), 2)
     except Exception as e:
         print(f"⚠️ Edge-TTS synthesis failed: {e}")
         return b"\xff" * 16000
@@ -861,7 +873,7 @@ def _trigger_urgent_call_impl(
     print(f"Target: {target_sip_uri}")
     print(f"Sender: {clean_sender}")
     print(f"Subject: {clean_subject}")
-    print(f"Voice: British Executive ({VOICE_NAME}, rate={VOICE_RATE})")
+    print(f"Voice: American Executive ({VOICE_MODEL}, rate={VOICE_RATE})")
     print(f"=======================================================")
 
     # Load pre-cached static filler assets instantly (0.001s)
