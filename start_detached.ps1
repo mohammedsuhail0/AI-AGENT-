@@ -34,8 +34,8 @@ if ($result.ReturnValue -ne 0) {
 
 $newPid = $result.ProcessId
 Write-Host "✅ TARS Supervisor spawned successfully with PID: $newPid (Parent: WmiPrvSE.exe)" -ForegroundColor Green
-Write-Host "3. Waiting 5 seconds for SIP registration..." -ForegroundColor Yellow
-Start-Sleep -Seconds 5
+Write-Host "3. Waiting 10 seconds for SIP registration..." -ForegroundColor Yellow
+Start-Sleep -Seconds 10
 
 # 4. Check active ports
 Write-Host "4. Verifying active ports (8080 & 5060)..." -ForegroundColor Yellow

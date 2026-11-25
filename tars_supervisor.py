@@ -20,8 +20,11 @@ LOG_FILE = os.path.join(LOG_DIR, "tars_supervisor.log")
 SERVER_LOG = os.path.join(LOG_DIR, "tars_server.log")
 
 handlers = [logging.FileHandler(LOG_FILE, encoding="utf-8")]
-if sys.stdout is not None:
-    handlers.append(logging.StreamHandler(sys.stdout))
+try:
+    if sys.stdout is not None and hasattr(sys.stdout, "isatty") and sys.stdout.isatty():
+        handlers.append(logging.StreamHandler(sys.stdout))
+except Exception:
+    pass
 
 logging.basicConfig(
     level=logging.INFO,
@@ -78,21 +81,21 @@ def main():
         time.sleep(1)
 
         logger.info("🚀 Launching TARS Voice Call Server (call_server.py)...")
-        with open(SERVER_LOG, "a", encoding="utf-8") as out_f:
-            out_f.write(f"\n--- TARS SERVER START: {time.ctime()} ---\n")
-            out_f.flush()
+        out_f = open(SERVER_LOG, "a", encoding="utf-8")
+        out_f.write(f"\n--- TARS SERVER START: {time.ctime()} ---\n")
+        out_f.flush()
 
-            proc = subprocess.Popen(
-                [python_exe, "-u", "call_server.py"],
-                cwd=LOG_DIR,
-                stdout=out_f,
-                stderr=subprocess.STDOUT
-            )
+        proc = subprocess.Popen(
+            [python_exe, "-u", "call_server.py"],
+            cwd=LOG_DIR,
+            stdout=out_f,
+            stderr=subprocess.STDOUT
+        )
 
         logger.info(f"✅ TARS call_server.py started with PID {proc.pid}")
 
         # Wait a few seconds for startup
-        time.sleep(5)
+        time.sleep(8)
 
         failed_checks = 0
         while True:
@@ -117,6 +120,11 @@ def main():
                     break
             else:
                 failed_checks = 0
+
+        try:
+            out_f.close()
+        except Exception:
+            pass
 
         logger.info("🔄 Auto-restarting TARS in 3 seconds...")
         time.sleep(3)
