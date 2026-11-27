@@ -1728,10 +1728,10 @@ def run_inbound_sip_server(port=5060):
         cur_ip = reg_state.get("nat_ip", reg_state["public_ip"])
         cur_port = reg_state.get("nat_port", port)
 
-        contact_hdrs = ""
-        if cur_port != 5060:
-            contact_hdrs += f"Contact: <sip:{username}@{cur_ip}:5060>;expires=0\r\n"
-        contact_hdrs += f"Contact: <sip:{username}@{cur_ip}:{cur_port}>;expires=600\r\n"
+        if reg_state.get("registered", False):
+            contact_hdrs = f"Contact: <sip:{username}@{cur_ip}:{cur_port}>;expires=600\r\n"
+        else:
+            contact_hdrs = ""
 
         reg_packet = (
             f"REGISTER sip:{server} SIP/2.0\r\n"
@@ -1798,6 +1798,8 @@ def run_inbound_sip_server(port=5060):
                 auth_req_name = "Proxy-Authorization" if "407" in msg else "Authorization"
                 challenge = parse_auth_challenge(msg, auth_header_name)
                 if challenge and challenge.get("nonce"):
+                    reg_state["last_challenge"] = challenge
+                    reg_state["last_auth_name"] = auth_req_name
                     # Extract server-reflected NAT port and IP from Via header
                     rport_m = re.search(r';rport=(\d+)', msg, re.IGNORECASE)
                     received_m = re.search(r';received=([0-9a-fA-F\.:]+)', msg, re.IGNORECASE)
@@ -1820,11 +1822,8 @@ def run_inbound_sip_server(port=5060):
                         opaque=challenge.get("opaque")
                     )
 
-                    # Purge dead port 5060 contact and register live NAT port
-                    contact_lines = ""
-                    if nat_port != 5060:
-                        contact_lines += f"Contact: <sip:{username}@{nat_ip}:5060>;expires=0\r\n"
-                    contact_lines += f"Contact: <sip:{username}@{nat_ip}:{nat_port}>;expires=600\r\n"
+                    # Register live public NAT endpoint
+                    contact_lines = f"Contact: <sip:{username}@{nat_ip}:{nat_port}>;expires=600\r\n"
 
                     reg2 = (
                         f"REGISTER sip:{server} SIP/2.0\r\n"
@@ -1855,10 +1854,60 @@ def run_inbound_sip_server(port=5060):
                 if received_m:
                     reg_state["nat_ip"] = received_m.group(1)
 
-                contacts_found = re.findall(r'Contact:\s*<([^>]+)>', msg, re.IGNORECASE)
+                # Parse ALL contacts across all Contact headers and comma-separated lists
+                contact_headers = re.findall(r'Contact:\s*([^\r\n]+)', msg, re.IGNORECASE)
+                all_contacts = []
+                for ch in contact_headers:
+                    for u in re.findall(r'<([^>]+)>', ch):
+                        all_contacts.append(u)
+
                 print(f"✅ Linphone Registration Confirmed: 200 OK for {username}@{server}!")
-                print(f"📋 Registered Contacts with Flexisip: {contacts_found}")
+                print(f"📋 Registered Contacts with Flexisip: {all_contacts}")
                 print(f"👉 Ready for inbound calls! Dial '{username}' from Linphone app.\n")
+
+                # Auto-purge any stale or private LAN contacts from Flexisip
+                active_endpoint = f"{reg_state['nat_ip']}:{reg_state['nat_port']}"
+                stale_contacts = [c for c in all_contacts if active_endpoint not in c]
+                if stale_contacts:
+                    print(f"🧹 Detected {len(stale_contacts)} stale/unroutable contact(s) in Flexisip: {stale_contacts}")
+                    try:
+                        reg_state["cseq"] += 1
+                        branch_purge = "z9hG4bK" + uuid.uuid4().hex[:20]
+                        purge_lines = "".join(f"Contact: <{c}>;expires=0\r\n" for c in stale_contacts)
+                        active_line = f"Contact: <sip:{username}@{reg_state['nat_ip']}:{reg_state['nat_port']}>;expires=600\r\n"
+                        last_ch = reg_state.get("last_challenge")
+                        auth_req_name = reg_state.get("last_auth_name", "Authorization")
+                        auth_str = ""
+                        if last_ch and last_ch.get("nonce"):
+                            p_auth = compute_digest(
+                                username=username,
+                                password=password,
+                                realm=last_ch["realm"],
+                                nonce=last_ch["nonce"],
+                                method="REGISTER",
+                                uri=f"sip:{server}",
+                                qop=last_ch.get("qop"),
+                                opaque=last_ch.get("opaque")
+                            )
+                            auth_str = f"{auth_req_name}: {p_auth}\r\n"
+                        purge_pkt = (
+                            f"REGISTER sip:{server} SIP/2.0\r\n"
+                            f"Via: SIP/2.0/UDP {reg_state['nat_ip']}:{reg_state['nat_port']};branch={branch_purge};rport\r\n"
+                            f"From: <sip:{username}@{server}>;tag={reg_state['from_tag']}\r\n"
+                            f"To: <sip:{username}@{server}>\r\n"
+                            f"Call-ID: {reg_state['call_id']}\r\n"
+                            f"CSeq: {reg_state['cseq']} REGISTER\r\n"
+                            f"{purge_lines}"
+                            f"{active_line}"
+                            f"{auth_str}"
+                            "Max-Forwards: 70\r\n"
+                            f"User-Agent: {CALLER_DISPLAY}\r\n"
+                            "Content-Length: 0\r\n\r\n"
+                        )
+                        sock.sendto(purge_pkt.encode(), (server, server_port))
+                        print(f"🚀 Sent purge request to clear {len(stale_contacts)} stale contact(s) from Flexisip.")
+                    except Exception as pe:
+                        print(f"⚠️ Failed to send purge request: {pe}")
                 if first_success:
                     send_telegram_status(
                         f"🟢 *TARS Voice Sentinel is ONLINE*\n"
@@ -1919,14 +1968,14 @@ def run_inbound_sip_server(port=5060):
                 nat_port = reg_state.get("nat_port", port)
                 nat_ip = reg_state.get("nat_ip", cur_pub_ip)
                 is_on_lan = any(ip.startswith(("192.168.", "10.", "172.")) for ip, _ in destinations)
-                advertised_ip = cur_loc_ip if is_on_lan else cur_pub_ip
+                advertised_ip = cur_loc_ip if is_on_lan else nat_ip
                 advertised_sip_port = port if is_on_lan else nat_port
 
                 rtp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                 rtp_sock.bind(("0.0.0.0", 0))
                 local_rtp_port = rtp_sock.getsockname()[1]
 
-                sdp_answer, tx_srtp, rx_srtp = build_sdp_answer(sdp_part, cur_loc_ip, cur_pub_ip, local_rtp_port, is_lan=is_on_lan)
+                sdp_answer, tx_srtp, rx_srtp = build_sdp_answer(sdp_part, cur_loc_ip, nat_ip, local_rtp_port, is_lan=is_on_lan)
                 print(f"📤 200 OK SDP ANSWER:\n{sdp_answer.strip()}\n")
 
                 resp_200 = (

@@ -13,9 +13,9 @@ $supervisorScript = "$workDir\tars_supervisor.py"
 
 # 1. Kill any existing TARS processes
 Write-Host "1. Clearing any existing TARS processes..." -ForegroundColor Yellow
-Get-Process python*, pythonw* -ErrorAction SilentlyContinue | Where-Object { 
+Get-CimInstance Win32_Process -Filter "Name = 'python.exe' or Name = 'pythonw.exe'" -ErrorAction SilentlyContinue | Where-Object { 
     $_.CommandLine -like "*tars*" -or $_.CommandLine -like "*call_server*" 
-} | Stop-Process -Force -ErrorAction SilentlyContinue
+} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 
 Start-Sleep -Seconds 1
 
